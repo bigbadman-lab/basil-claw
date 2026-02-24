@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any, Tuple
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from pypdf import PdfReader
 
 import psycopg2
 from psycopg2.extras import execute_values
@@ -20,6 +21,7 @@ EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 CANON_PATH = os.path.join("ingest", "sources", "basil_canon.md")
 URLS_PATH = os.path.join("ingest", "sources", "restore_britain_urls.txt")
+SUMMARIES_DIR = os.path.join("ingest", "sources", "summaries")
 
 
 @dataclass
@@ -32,6 +34,20 @@ class SourceDoc:
 
 def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def sanitize_text(text: str) -> str:
+    """
+    Postgres cannot store NUL (\\x00). PDFs sometimes include it.
+    Also strip other problematic control chars while keeping newlines/tabs.
+    """
+    if text is None:
+        return ""
+    # Remove NULs
+    text = text.replace("\x00", "")
+    # Remove other control chars except \\n, \\r, \\t
+    text = "".join(ch for ch in text if ch in "\n\r\t" or ord(ch) >= 32)
+    return text
 
 
 def fetch_url_text(url: str, timeout: int = 30) -> Tuple[str, str]:
@@ -53,8 +69,19 @@ def fetch_url_text(url: str, timeout: int = 30) -> Tuple[str, str]:
     lines = [ln.strip() for ln in text.splitlines()]
     lines = [ln for ln in lines if ln]
     clean = "\n".join(lines)
+    clean = sanitize_text(clean)
 
     return title, clean
+
+
+def extract_pdf_text(path: str) -> str:
+    reader = PdfReader(path)
+    pages = []
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            pages.append(text.strip())
+    return "\n\n".join(pages)
 
 
 def load_sources() -> List[SourceDoc]:
@@ -63,6 +90,7 @@ def load_sources() -> List[SourceDoc]:
     # 1) Canon markdown
     with open(CANON_PATH, "r", encoding="utf-8") as f:
         canon_text = f.read().strip()
+    canon_text = sanitize_text(canon_text)
     if not canon_text:
         raise RuntimeError("basil_canon.md is empty")
 
@@ -85,6 +113,36 @@ def load_sources() -> List[SourceDoc]:
             title=title,
             text=clean
         ))
+
+    if os.path.isdir(SUMMARIES_DIR):
+        for name in sorted(os.listdir(SUMMARIES_DIR)):
+            if name.lower().endswith(".md"):
+                path = os.path.join(SUMMARIES_DIR, name)
+                with open(path, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+                if not text:
+                    continue
+                title = os.path.splitext(os.path.basename(path))[0]
+                docs.append(SourceDoc(
+                    source_type="summary",
+                    locator=path,
+                    title=title,
+                    text=text
+                ))
+
+    # 3) Local PDFs in ingest/sources
+    sources_dir = os.path.join("ingest", "sources")
+    for name in os.listdir(sources_dir):
+        if name.lower().endswith(".pdf"):
+            path = os.path.join(sources_dir, name)
+            text = extract_pdf_text(path)
+            text = sanitize_text(text)
+            docs.append(SourceDoc(
+                source_type="pdf",
+                locator=path,
+                title=os.path.splitext(os.path.basename(path))[0],
+                text=text
+            ))
 
     return docs
 
@@ -301,6 +359,11 @@ def insert_embeddings(cur, embeddings_cols: List[str], chunk_ids: List[Any], vec
 def main():
     print("Loading sources...")
     docs = load_sources()
+    if os.getenv("DRY_RUN") == "1":
+        print("DRY_RUN enabled. Loaded sources:")
+        for d in docs:
+            print(f"- {d.source_type}: {d.title} ({d.locator}) chars={len(d.text)}")
+        return
     print(f"Found {len(docs)} sources")
 
     print("Connecting to Postgres...")
@@ -320,11 +383,18 @@ def main():
                 source_id = insert_source(cur, sources_cols, doc)
                 print(f"source_id = {source_id}")
 
-                chs = chunk_text(doc.text)
-                print(f"chunks = {len(chs)}")
+                # Re-ingest strategy: replace all chunks+embeddings for this source
+                # 1) delete embeddings linked to chunks for this source
+                cur.execute(
+                    "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE source_id = %s)",
+                    (source_id,)
+                )
+                # 2) delete chunks for this source
+                cur.execute("DELETE FROM chunks WHERE source_id = %s", (source_id,))
 
-                # Optional: clear old chunks/embeddings for this source if your schema supports it.
-                # (We’re not doing deletes yet—keeping it simple & safe.)
+                chs = chunk_text(doc.text)
+                chs = [sanitize_text(c) for c in chs]
+                print(f"chunks = {len(chs)}")
 
                 chunk_ids = insert_chunks(cur, chunks_cols, source_id, chs)
                 print(f"inserted chunks = {len(chunk_ids)}")

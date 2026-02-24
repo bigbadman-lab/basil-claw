@@ -1,6 +1,6 @@
 import os
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
 from dotenv import load_dotenv
 import psycopg2
@@ -56,10 +56,15 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
     Returns list of tuples: (chunk_id, source_title, chunk_text)
 
     Assumes:
-      embeddings(chunk_id, embedding OR vector)
+      embeddings(chunk_id, embedding OR vector, optional model)
       chunks(id, source_id, text OR content OR chunk_text)
-      sources(id, title)
+      sources(id, title, optional source_type/type)
+    Uses cosine distance, model filter, source weighting, and diversity (max 2 per source).
     """
+    DEBUG_RETRIEVAL = True
+    BEST_MATCH_MAX = 0.38
+    KEEP_MATCH_MAX = 0.45
+    candidate_limit = 20
     with conn.cursor() as cur:
         # detect actual column names
         cur.execute("""
@@ -70,6 +75,7 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
         vec_col = "embedding" if "embedding" in emb_cols else ("vector" if "vector" in emb_cols else None)
         if not vec_col:
             raise RuntimeError("embeddings table missing vector column (expected 'embedding' or 'vector').")
+        filter_by_model = "model" in emb_cols
 
         cur.execute("""
             SELECT column_name FROM information_schema.columns
@@ -80,19 +86,115 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
         if not text_col:
             raise RuntimeError("chunks table missing text column (expected 'text' or 'content' or 'chunk_text').")
 
-        sql = f"""
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='sources'
+        """)
+        src_cols = {r[0] for r in cur.fetchall()}
+        if "source_type" in src_cols:
+            source_type_expr = "s.source_type"
+        elif "type" in src_cols:
+            source_type_expr = "s.type"
+        else:
+            source_type_expr = "NULL::text"
+
+        # Placeholder order: 1st SELECT distance (%s), 2nd WHERE e.model = %s, 3rd ORDER BY (%s), 4th LIMIT %s (when filter_by_model)
+        where_model = " AND e.model = %s" if filter_by_model else ""
+
+        sql_cosine = f"""
             SELECT
                 e.chunk_id,
                 COALESCE(s.title, 'Unknown Source') as source_title,
-                c.{text_col} as chunk_text
+                c.{text_col} as chunk_text,
+                (e.{vec_col} <=> (%s)::vector) as distance,
+                {source_type_expr} as source_type
             FROM embeddings e
             JOIN chunks c ON c.id = e.chunk_id
             LEFT JOIN sources s ON s.id = c.source_id
-            ORDER BY e.{vec_col} <-> %s
+            WHERE 1=1{where_model}
+            ORDER BY e.{vec_col} <=> (%s)::vector
             LIMIT %s
         """
-        cur.execute(sql, (query_vec, k))
-        return cur.fetchall()
+        sql_l2 = f"""
+            SELECT
+                e.chunk_id,
+                COALESCE(s.title, 'Unknown Source') as source_title,
+                c.{text_col} as chunk_text,
+                (e.{vec_col} <-> (%s)::vector) as distance,
+                {source_type_expr} as source_type
+            FROM embeddings e
+            JOIN chunks c ON c.id = e.chunk_id
+            LEFT JOIN sources s ON s.id = c.source_id
+            WHERE 1=1{where_model}
+            ORDER BY e.{vec_col} <-> (%s)::vector
+            LIMIT %s
+        """
+        if filter_by_model:
+            params_cosine = (query_vec, EMBED_MODEL, query_vec, candidate_limit)
+            params_l2 = (query_vec, EMBED_MODEL, query_vec, candidate_limit)
+        else:
+            params_cosine = (query_vec, query_vec, candidate_limit)
+            params_l2 = (query_vec, query_vec, candidate_limit)
+
+        try:
+            cur.execute(sql_cosine, params_cosine)
+        except Exception:
+            conn.rollback()
+            cur.execute(sql_l2, params_l2)
+        rows = cur.fetchall()
+
+    if DEBUG_RETRIEVAL:
+        print("Top candidates (raw):")
+        for r in rows[:10]:
+            chunk_id, source_title, chunk_text, raw_dist, _ = r[0], r[1], r[2], float(r[3]), r[4]
+            print(f"  {raw_dist:.4f}  {chunk_id}  {source_title}")
+
+    # Weight by source: canon +0.05 penalty, else -0.02 bonus
+    weighted: List[Tuple[float, float, int, str, str]] = []
+    for r in rows:
+        chunk_id, source_title, chunk_text, raw_distance, source_type = r[0], r[1], r[2], float(r[3]), r[4]
+        adjusted_distance = raw_distance
+        if source_type == "canon":
+            adjusted_distance += 0.05
+        else:
+            adjusted_distance -= 0.02
+        weighted.append((adjusted_distance, raw_distance, chunk_id, source_title, chunk_text))
+
+    weighted.sort(key=lambda x: x[0])
+
+    # Diversity: max 2 chunks per source_title
+    chosen: List[Tuple[int, str, str]] = []
+    chosen_debug: List[Tuple[float, float, int, str]] = []
+    per_source_count: Dict[str, int] = {}
+    for adjusted_distance, raw_distance, chunk_id, source_title, chunk_text in weighted:
+        n = per_source_count.get(source_title, 0)
+        if n >= 2:
+            continue
+        per_source_count[source_title] = n + 1
+        chosen.append((chunk_id, source_title, chunk_text))
+        chosen_debug.append((adjusted_distance, raw_distance, chunk_id, source_title))
+        if len(chosen) >= k:
+            break
+
+    if DEBUG_RETRIEVAL:
+        print("Selected (after weighting/diversity):")
+        for adj, raw, cid, st in chosen_debug:
+            print(f"  {adj:.4f}  {raw:.4f}  {cid}  {st}")
+
+    if not chosen:
+        return []
+
+    best_adjusted_distance = chosen_debug[0][0]
+    if best_adjusted_distance > BEST_MATCH_MAX:
+        if DEBUG_RETRIEVAL:
+            print(f"Retrieval rejected: best match too weak (best_adjusted={best_adjusted_distance:.4f})")
+        return []
+
+    chosen_filtered = [chosen[i] for i in range(len(chosen)) if chosen_debug[i][0] <= KEEP_MATCH_MAX]
+    if DEBUG_RETRIEVAL:
+        print(f"Filtered weak chunks: kept {len(chosen_filtered)} of {len(chosen)} (KEEP_MATCH_MAX={KEEP_MATCH_MAX})")
+
+    return chosen_filtered
 
 
 # --- 4) Load Basil canon from DB if present, else fallback to file ---
@@ -192,7 +294,7 @@ Context:
 
 def main():
     # Change this line to test different messages
-    test_tweet = "gm basil"
+    test_tweet = "What should we do about immigration policy to restore Britain?"
 
     intent = classify_intent(test_tweet)
     print(f"\nIntent = {intent}")
