@@ -1,0 +1,2 @@
+DATABASE_URL=postgresql://basil_db_user:7pNtq90oN6xWm9GtEkLkj6hF9uerhre0@dpg-d6er1ea4d50c73fvd130-a.oregon-postgres.render.com/basil_db?sslmode=require
+OPENAI_API_KEY=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
