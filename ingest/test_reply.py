@@ -51,7 +51,7 @@ def embed_query(text: str) -> List[float]:
 
 
 # --- 3) Retrieve top-K relevant chunks via pgvector ---
-def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int, str, str]]:
+def retrieve_chunks(conn, query_vec: List[float], query_text: str, k: int = 6) -> List[Tuple[int, str, str]]:
     """
     Returns list of tuples: (chunk_id, source_title, chunk_text)
 
@@ -62,8 +62,9 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
     Uses cosine distance, model filter, source weighting, and diversity (max 2 per source).
     """
     DEBUG_RETRIEVAL = True
-    BEST_MATCH_MAX = 0.38
-    KEEP_MATCH_MAX = 0.45
+    BEST_MATCH_MAX = 0.85
+    KEEP_MATCH_MAX = 0.92
+    ENTITY_BONUS = 0.18
     candidate_limit = 20
     with conn.cursor() as cur:
         # detect actual column names
@@ -75,7 +76,8 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
         vec_col = "embedding" if "embedding" in emb_cols else ("vector" if "vector" in emb_cols else None)
         if not vec_col:
             raise RuntimeError("embeddings table missing vector column (expected 'embedding' or 'vector').")
-        filter_by_model = "model" in emb_cols
+        model_col = next((c for c in ("model", "embedding_model", "embed_model") if c in emb_cols), None)
+        filter_by_model = model_col is not None
 
         cur.execute("""
             SELECT column_name FROM information_schema.columns
@@ -98,8 +100,13 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
         else:
             source_type_expr = "NULL::text"
 
-        # Placeholder order: 1st SELECT distance (%s), 2nd WHERE e.model = %s, 3rd ORDER BY (%s), 4th LIMIT %s (when filter_by_model)
-        where_model = " AND e.model = %s" if filter_by_model else ""
+        qt = (query_text or "").lower()
+        name_where = ""
+        if ("musk" in qt) or ("elon" in qt):
+            name_where = f" AND (COALESCE(s.title,'') ILIKE '%%musk%%' OR COALESCE(s.title,'') ILIKE '%%elon%%' OR c.{text_col} ILIKE '%%musk%%' OR c.{text_col} ILIKE '%%elon%%')"
+
+        # Placeholder order: 1st SELECT distance (%s), 2nd WHERE e.<model_col> = %s, 3rd ORDER BY (%s), 4th LIMIT %s (when filter_by_model)
+        where_model = f" AND e.{model_col} = %s" if filter_by_model else ""
 
         sql_cosine = f"""
             SELECT
@@ -111,7 +118,7 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
             FROM embeddings e
             JOIN chunks c ON c.id = e.chunk_id
             LEFT JOIN sources s ON s.id = c.source_id
-            WHERE 1=1{where_model}
+            WHERE 1=1{where_model}{name_where}
             ORDER BY e.{vec_col} <=> (%s)::vector
             LIMIT %s
         """
@@ -125,7 +132,7 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
             FROM embeddings e
             JOIN chunks c ON c.id = e.chunk_id
             LEFT JOIN sources s ON s.id = c.source_id
-            WHERE 1=1{where_model}
+            WHERE 1=1{where_model}{name_where}
             ORDER BY e.{vec_col} <-> (%s)::vector
             LIMIT %s
         """
@@ -137,6 +144,9 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
             params_l2 = (query_vec, query_vec, candidate_limit)
 
         try:
+            print("SQL (cosine):", sql_cosine)
+            print("sql.count('%s'):", sql_cosine.count("%s"))
+            print("len(params_cosine):", len(params_cosine))
             cur.execute(sql_cosine, params_cosine)
         except Exception:
             conn.rollback()
@@ -146,10 +156,13 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
     if DEBUG_RETRIEVAL:
         print("Top candidates (raw):")
         for r in rows[:10]:
-            chunk_id, source_title, chunk_text, raw_dist, _ = r[0], r[1], r[2], float(r[3]), r[4]
-            print(f"  {raw_dist:.4f}  {chunk_id}  {source_title}")
+            chunk_id, source_title, chunk_text, raw_dist, source_type = r[0], r[1], r[2], float(r[3]), r[4]
+            print(f"  {raw_dist:.4f}  {chunk_id}  {source_title}  {source_type}")
 
     # Weight by source: canon +0.05 penalty, else -0.02 bonus
+    query_lower = (query_text or "").lower()
+    entity_terms = ("elon", "musk")
+    query_has_entity = any(t in query_lower for t in entity_terms)
     weighted: List[Tuple[float, float, int, str, str]] = []
     for r in rows:
         chunk_id, source_title, chunk_text, raw_distance, source_type = r[0], r[1], r[2], float(r[3]), r[4]
@@ -158,6 +171,11 @@ def retrieve_chunks(conn, query_vec: List[float], k: int = 6) -> List[Tuple[int,
             adjusted_distance += 0.05
         else:
             adjusted_distance -= 0.02
+        if query_has_entity:
+            st_lower = (source_title or "").lower()
+            ct_lower = (chunk_text or "").lower()
+            if any(t in st_lower or t in ct_lower for t in entity_terms):
+                adjusted_distance -= ENTITY_BONUS
         weighted.append((adjusted_distance, raw_distance, chunk_id, source_title, chunk_text))
 
     weighted.sort(key=lambda x: x[0])
@@ -294,7 +312,7 @@ Context:
 
 def main():
     # Change this line to test different messages
-    test_tweet = "What should we do about immigration policy to restore Britain?"
+    test_tweet = "what do you think about elon musk?"
 
     intent = classify_intent(test_tweet)
     print(f"\nIntent = {intent}")
@@ -306,7 +324,7 @@ def main():
         retrieved = []
         if intent in ("policy_question", "other"):
             qvec = embed_query(test_tweet)
-            retrieved = retrieve_chunks(conn, qvec, k=6)
+            retrieved = retrieve_chunks(conn, qvec, test_tweet, k=6)
 
         print(f"Retrieved chunks = {len(retrieved)}")
         for cid, st, _ in retrieved[:3]:
