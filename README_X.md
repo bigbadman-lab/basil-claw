@@ -15,6 +15,10 @@ Poll Basil’s X mentions, generate replies with the retrieval-grounded reply en
 | `X_USER_ID` | Yes | Numeric X user ID of the Basil account (used for mentions endpoint). |
 | `EMBEDDING_MODEL` | No | Default `text-embedding-3-small`. |
 | `CHAT_MODEL` | No | Default `gpt-4.1-mini`. |
+| `X_DRY_RUN` | No | Set to `1`, `true`, or `yes` to fetch and draft only (no posts to X). |
+| `X_POSTING_ENABLED` | No | Env kill switch; posting only when set (e.g. `1`) and DB `posting_enabled` is true. |
+| `MAX_POSTS_PER_RUN` | No | Max replies to post per run. Default `50`. |
+| `HOURLY_POST_CAP` | No | Max replies in any rolling hour. Default `300`. |
 
 Create and use a project/app in the [X Developer Portal](https://developer.x.com/) with OAuth 1.0a and “Read and write” (so you can read mentions and post replies). Use the same app’s keys and generate a user Access Token and Secret for the Basil account.
 
@@ -41,3 +45,11 @@ If the X API call to get mentions fails, the script exits non-zero. If a single 
 ## Scheduling
 
 This file does not implement scheduling. Run `python3 -m x_bridge.run_mentions_once` from cron, a job runner, or your own scheduler at the desired interval (e.g. every 5–15 minutes, respecting X rate limits).
+
+Example cron (live posting; caps shown in env; each run logs `max_posts_per_run`, `hourly_post_cap`, `allowed_this_run`, and at end `posted_this_run`, `posted_last_hour`, etc.):
+
+```bash
+X_DRY_RUN=0 X_POSTING_ENABLED=1 MAX_POSTS_PER_RUN=50 HOURLY_POST_CAP=300 python3 -m x_bridge.run_mentions_once
+```
+
+For dry-run (no posts), use `X_DRY_RUN=1` and omit or leave `X_POSTING_ENABLED` unset.

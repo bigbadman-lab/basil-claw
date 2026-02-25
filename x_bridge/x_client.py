@@ -9,28 +9,14 @@ from typing import Any, Optional
 
 import tweepy
 
-_X_CLIENT: Optional[tweepy.Client] = None
 
-
-def _get_client() -> tweepy.Client:
-    global _X_CLIENT
-    if _X_CLIENT is not None:
-        return _X_CLIENT
-    key = os.getenv("X_API_KEY")
-    secret = os.getenv("X_API_SECRET")
-    token = os.getenv("X_ACCESS_TOKEN")
-    token_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
-    if not all((key, secret, token, token_secret)):
-        raise RuntimeError(
-            "X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET must be set."
-        )
-    _X_CLIENT = tweepy.Client(
-        consumer_key=key,
-        consumer_secret=secret,
-        access_token=token,
-        access_token_secret=token_secret,
+def get_v2_client() -> tweepy.Client:
+    return tweepy.Client(
+        consumer_key=os.environ["X_API_KEY"],
+        consumer_secret=os.environ["X_API_SECRET"],
+        access_token=os.environ["X_ACCESS_TOKEN"],
+        access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
     )
-    return _X_CLIENT
 
 
 def _user_id() -> str:
@@ -48,7 +34,7 @@ def get_mentions(
     Fetch mentions of the authenticated user (Basil).
     Returns list of dicts with: tweet_id, author_id, author_username, text, created_at, raw (API tweet obj).
     """
-    client = _get_client()
+    client = get_v2_client()
     uid = _user_id()
     resp = client.get_users_mentions(
         id=uid,
@@ -123,18 +109,23 @@ def _json_safe(v: Any) -> Any:
 
 def post_reply(text: str, in_reply_to_tweet_id: str) -> str:
     """
-    Post a reply tweet. Returns the new tweet id (string).
+    Posts a reply using X API v2.
+    Returns the reply tweet ID.
     """
-    client = _get_client()
+    client = get_v2_client()
+
     resp = client.create_tweet(
         text=text,
         in_reply_to_tweet_id=in_reply_to_tweet_id,
         user_auth=True,
     )
-    data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
-    if not data:
-        raise RuntimeError("create_tweet returned no data")
-    tid = getattr(data, "id", None) or (data.get("id") if isinstance(data, dict) else None)
-    if not tid:
-        raise RuntimeError("create_tweet response had no tweet id")
-    return str(tid)
+
+    if not resp or not getattr(resp, "data", None):
+        raise RuntimeError(f"Unexpected X API response: {resp}")
+
+    data = resp.data
+    reply_id = getattr(data, "id", None) or (data.get("id") if isinstance(data, dict) else None)
+    if reply_id is None:
+        raise RuntimeError(f"Unexpected X API response: {resp}")
+
+    return str(reply_id)

@@ -162,6 +162,46 @@ It is:
 
 All factual grounding must originate from retrieved sources.
 
+## Ops: Monitoring Queries
+
+Use these against your Postgres DB (e.g. `psql $DATABASE_URL`) to monitor the X mention loop. Tables and columns match `schema.sql` and migrations (`x_replies`, `x_cursor`).
+
+**posted_last_hour, errors_last_hour, pending_unclaimed (single row):**
+
+```sql
+SELECT
+  (SELECT COUNT(*) FROM x_replies
+   WHERE reply_tweet_id IS NOT NULL AND posted_at >= now() - interval '1 hour') AS posted_last_hour,
+  (SELECT COUNT(*) FROM x_replies
+   WHERE error_text IS NOT NULL AND post_claimed_at >= now() - interval '1 hour') AS errors_last_hour,
+  (SELECT COUNT(*) FROM x_replies
+   WHERE reply_tweet_id IS NULL AND (error_text IS NULL OR error_text = '')) AS pending_unclaimed;
+```
+
+**claimed_but_unposted older than 10 minutes:**
+
+```sql
+SELECT id, mention_tweet_id, post_claimed_at, post_claimed_by, error_text
+FROM x_replies
+WHERE post_claimed_at IS NOT NULL
+  AND reply_tweet_id IS NULL
+  AND post_claimed_at < now() - interval '10 minutes';
+```
+
+**Cursor posting state (enabled/disabled, reason, until, consecutive failures):**
+
+```sql
+SELECT
+  posting_enabled,
+  posting_disabled_reason,
+  posting_disabled_at,
+  posting_disabled_until,
+  consecutive_post_failures,
+  last_post_error_at
+FROM x_cursor
+WHERE id = 1;
+```
+
 ## Roadmap
 
 See [docs/roadmap.md](docs/roadmap.md).
