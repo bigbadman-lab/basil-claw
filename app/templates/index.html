@@ -15,16 +15,22 @@
     .char-count { font-size: 0.875rem; color: #666; margin-top: 0.25rem; }
     button { margin-top: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
     button.copy { margin-left: 0.5rem; }
+    .logout-wrap { margin-top: 1.5rem; }
   </style>
 </head>
 <body>
   <h1>Basil Tweet Draft</h1>
-  <p>Generate a single Basil-style tweet from raw content. No X API; draft only.</p>
 
-  <form method="post" action="/generate">
+  {% if not authed %}
+  <p>Unlock to generate Basil-style tweet drafts.</p>
+  <form method="post" action="/login">
     <label for="password">Password</label>
     <input type="password" id="password" name="password" required autocomplete="current-password">
-
+    <button type="submit">Unlock</button>
+  </form>
+  {% else %}
+  <p>Generate a single Basil-style tweet from raw content. No X API; draft only.</p>
+  <form method="post" action="/generate">
     <label for="raw_content">Raw Content <em>(required)</em></label>
     <textarea id="raw_content" name="raw_content" required placeholder="Paste or type the facts to turn into one tweet.">{{ raw_content or "" }}</textarea>
 
@@ -44,12 +50,18 @@
 
     <button type="submit">Generate</button>
   </form>
+  <div class="logout-wrap">
+    <form method="post" action="/logout" style="display: inline;">
+      <button type="submit">Logout</button>
+    </form>
+  </div>
+  {% endif %}
 
   {% if error %}
   <p class="error">{{ error }}</p>
   {% endif %}
 
-  {% if output %}
+  {% if authed and output %}
   <div class="output-wrap">
     <label>Output</label>
     <textarea id="output" readonly>{{ output }}</textarea>

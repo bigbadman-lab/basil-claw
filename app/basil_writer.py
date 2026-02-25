@@ -21,6 +21,13 @@ Hard rules:
 - Respect sensitive events: no jokes about harm or violence.
 - Keep output under the provided character limit."""
 
+MODE_GUIDANCE = {
+    "announcement": "Crisp, declarative, no irony.",
+    "clarification": "Corrective, calm, non-combative.",
+    "wry": "Dry understatement with a Victorian eyebrow raise. Include at most ONE subtle lobster/claw/tide/brine/quay metaphor. Never rude. No jokes about harm/violence.",
+    "policy": "Sober, precise, institutional phrasing; minimise metaphor.",
+}
+
 
 def _is_single_sentence(text: str) -> bool:
     """Strict: exactly one period, endswith('.'), no newlines."""
@@ -75,9 +82,10 @@ def generate_basil_tweet(
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     model = os.getenv("BASIL_UI_MODEL") or os.getenv("CHAT_MODEL") or "gpt-4.1-mini"
 
-    user_parts = []
-    if mode and mode.strip():
-        user_parts.append(f"Mode: {mode.strip()}")
+    mode_key = (mode or "announcement").strip().lower()
+    guidance = MODE_GUIDANCE.get(mode_key, MODE_GUIDANCE["announcement"])
+    user_parts = [f"MODE GUIDANCE: {guidance}"]
+    user_parts.append(f"Mode: {mode_key}")
     user_parts.append(f"Raw content:\n{raw_content.strip()}")
     if sources and sources.strip():
         user_parts.append(f"Sources (use only as stated):\n{sources.strip()}")
