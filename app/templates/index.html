@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Basil Tweet Draft</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; }
+    label { display: block; margin-top: 0.75rem; font-weight: 500; }
+    input[type="password"], input[type="number"], select, textarea { width: 100%; padding: 0.4rem; margin-top: 0.25rem; box-sizing: border-box; }
+    textarea { min-height: 80px; resize: vertical; }
+    .error { color: #c00; margin: 0.75rem 0; }
+    .output-wrap { margin-top: 1rem; }
+    .output-wrap textarea { min-height: 60px; }
+    .char-count { font-size: 0.875rem; color: #666; margin-top: 0.25rem; }
+    button { margin-top: 1rem; padding: 0.5rem 1rem; cursor: pointer; }
+    button.copy { margin-left: 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>Basil Tweet Draft</h1>
+  <p>Generate a single Basil-style tweet from raw content. No X API; draft only.</p>
+
+  <form method="post" action="/generate">
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" required autocomplete="current-password">
+
+    <label for="raw_content">Raw Content <em>(required)</em></label>
+    <textarea id="raw_content" name="raw_content" required placeholder="Paste or type the facts to turn into one tweet.">{{ raw_content or "" }}</textarea>
+
+    <label for="sources">Sources <em>(optional)</em></label>
+    <textarea id="sources" name="sources" placeholder="Optional source notes.">{{ sources or "" }}</textarea>
+
+    <label for="mode">Mode</label>
+    <select id="mode" name="mode">
+      <option value="announcement" {{ "selected" if mode == "announcement" else "" }}>announcement</option>
+      <option value="clarification" {{ "selected" if mode == "clarification" else "" }}>clarification</option>
+      <option value="wry" {{ "selected" if mode == "wry" else "" }}>wry</option>
+      <option value="policy" {{ "selected" if mode == "policy" else "" }}>policy</option>
+    </select>
+
+    <label for="max_chars">Max Characters</label>
+    <input type="number" id="max_chars" name="max_chars" value="{{ max_chars or '240' }}" min="50" max="500" step="1">
+
+    <button type="submit">Generate</button>
+  </form>
+
+  {% if error %}
+  <p class="error">{{ error }}</p>
+  {% endif %}
+
+  {% if output %}
+  <div class="output-wrap">
+    <label>Output</label>
+    <textarea id="output" readonly>{{ output }}</textarea>
+    <div id="output-char-count" class="char-count"></div>
+    <button type="button" class="copy" onclick="copyOutput()">Copy to Clipboard</button>
+  </div>
+  <script>
+    function copyOutput() {
+      var ta = document.getElementById('output');
+      navigator.clipboard.writeText(ta.value).then(function() {
+        var btn = document.querySelector('button.copy');
+        var t = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(function() { btn.textContent = t; }, 1500);
+      });
+    }
+    function updateCharCount() {
+      var ta = document.getElementById('output');
+      var el = document.getElementById('output-char-count');
+      if (ta && el) {
+        var n = (ta.value || '').length;
+        el.textContent = n + ' character' + (n !== 1 ? 's' : '');
+      }
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+      var ta = document.getElementById('output');
+      if (ta) {
+        updateCharCount();
+        ta.addEventListener('input', updateCharCount);
+      }
+    });
+  </script>
+  {% endif %}
+</body>
+</html>

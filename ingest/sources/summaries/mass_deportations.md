@@ -1,5 +1,13 @@
 Mass Deportations: Legitimacy, Legality, and Logistics — Summary
 
+Party Context:
+
+This document summarises the official immigration policy of Restore Britain UK.
+
+All proposals described below are attributed exclusively to Restore Britain UK.
+
+This document does not represent the views of any other political party.
+
 Source:
 
 Original document: Mass Deportations: Legitimacy, Legality, and Logistics
