@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS x_mentions (
   in_reply_to_id    TEXT,
   status            TEXT NOT NULL DEFAULT 'new'   -- new|processing|replied|skipped|failed
 );
+ALTER TABLE x_mentions ADD COLUMN IF NOT EXISTS raw_json JSONB;
 
 CREATE TABLE IF NOT EXISTS x_replies (
   id                BIGSERIAL PRIMARY KEY,
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS x_replies (
   moderation_json   JSONB,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE x_replies ADD COLUMN IF NOT EXISTS raw_json JSONB;
 
 CREATE TABLE IF NOT EXISTS x_cursor (
   id               SMALLINT PRIMARY KEY DEFAULT 1,
