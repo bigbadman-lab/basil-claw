@@ -50,17 +50,14 @@ def get_mentions(
     """
     client = _get_client()
     uid = _user_id()
-    kwargs: dict[str, Any] = {
-        "user_id": uid,
-        "max_results": min(100, max(5, max_results)),
-        "tweet_fields": ["created_at", "author_id"],
-        "expansions": ["author_id"],
-        "user_fields": ["username"],
-    }
-    if since_id:
-        kwargs["since_id"] = since_id
-
-    resp = client.get_mentions(**kwargs)
+    resp = client.get_users_mentions(
+        id=uid,
+        since_id=since_id,
+        max_results=100,
+        tweet_fields=["created_at", "author_id", "conversation_id", "referenced_tweets"],
+        expansions=["author_id"],
+        user_fields=["username"],
+    )
     data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
     if not data:
         return []
