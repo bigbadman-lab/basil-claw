@@ -6,3 +6,4 @@ openai
 python-multipart
 itsdangerous
 tweepy
+psycopg2-binary

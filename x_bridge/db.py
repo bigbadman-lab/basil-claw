@@ -97,10 +97,15 @@ def upsert_mention(
 
 def mark_replied(tweet_id: str) -> None:
     """Set x_mentions.status = 'replied' for the given tweet_id."""
+    mark_mention_status(tweet_id, "replied")
+
+
+def mark_mention_status(tweet_id: str, status: str) -> None:
+    """Set x_mentions.status (e.g. 'replied', 'drafted')."""
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("UPDATE x_mentions SET status = 'replied' WHERE tweet_id = %s", (tweet_id,))
+            cur.execute("UPDATE x_mentions SET status = %s WHERE tweet_id = %s", (status, tweet_id))
         conn.commit()
     finally:
         conn.close()
@@ -129,12 +134,14 @@ def insert_reply(
     reply_text: str,
     created_at: Any = None,
     raw_json: Any = None,
+    decision: Optional[str] = None,
 ) -> None:
-    """Insert one row into x_replies. decision='posted' when reply_tweet_id is set."""
+    """Insert one row into x_replies. decision defaults to 'posted' when reply_tweet_id set else 'error'."""
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            decision = "posted" if reply_tweet_id else "error"
+            if decision is None:
+                decision = "posted" if reply_tweet_id else "error"
             raw_js = None
             if raw_json is not None:
                 raw_js = json.dumps(raw_json) if not isinstance(raw_json, str) else raw_json
