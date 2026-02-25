@@ -73,6 +73,7 @@ async def generate(
     Validate password and raw_content; call OpenAI via basil_writer.
     Return same template with error or generated output.
     """
+    global LAST_REQUEST_TS, LAST_OUTPUT
     from app.basil_writer import generate_basil_tweet, rewrite_basil_tweet
 
     if password != BASIL_UI_PASSWORD:
@@ -123,7 +124,6 @@ async def generate(
         )
 
     try:
-        global LAST_REQUEST_TS, LAST_OUTPUT
         LAST_REQUEST_TS = now
         out = generate_basil_tweet(
             raw_content=raw_content.strip(),
