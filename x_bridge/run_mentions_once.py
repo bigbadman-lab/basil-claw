@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 X_USER_ID = (os.getenv("X_USER_ID") or "").strip()
 
+_DRY_RUN_RAW = (os.getenv("X_DRY_RUN") or "").strip().lower()
+X_DRY_RUN = _DRY_RUN_RAW in ("1", "true", "yes")
+
 X_REPLY_MAX_LEN = 280
 X_REPLY_ELLIPSIS = "..."
 
@@ -61,6 +64,9 @@ def _truncate_reply_to_limit(reply: str, max_len: int = X_REPLY_MAX_LEN, suffix:
 
 
 def run_once() -> None:
+    if X_DRY_RUN:
+        logger.info("DRY RUN enabled: will not post to X")
+
     cursor = db.get_cursor("mentions_since_id")
     try:
         mentions = x_client.get_mentions(since_id=cursor, max_results=50)
@@ -153,6 +159,19 @@ def run_once() -> None:
             continue
 
         reply_text = _truncate_reply_to_limit(reply_text)
+
+        if X_DRY_RUN:
+            try:
+                db.insert_reply(
+                    in_reply_to_tweet_id=tweet_id,
+                    reply_tweet_id=None,
+                    reply_text=reply_text,
+                    decision="dry_run",
+                )
+                db.mark_mention_status(tweet_id, "drafted")
+            except Exception as e:
+                logger.warning("insert_reply/mark_mention_status (dry_run) failed for %s: %s", tweet_id, e)
+            continue
 
         try:
             reply_tweet_id = x_client.post_reply(reply_text, tweet_id)
