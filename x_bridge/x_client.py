@@ -57,6 +57,7 @@ def get_mentions(
         tweet_fields=["created_at", "author_id", "conversation_id", "referenced_tweets"],
         expansions=["author_id"],
         user_fields=["username"],
+        user_auth=True,
     )
     data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
     if not data:
