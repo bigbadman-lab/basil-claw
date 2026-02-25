@@ -422,6 +422,27 @@ def re_enable_posting(conn=None) -> None:
             c.close()
 
 
+def set_fetch_error(error_text: str, conn=None) -> None:
+    """Set last_fetch_error_at = now() and last_fetch_error_text on x_cursor (row id=1)."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_cursor
+                SET last_fetch_error_at = now(), last_fetch_error_text = %s
+                WHERE id = 1
+                """,
+                (error_text,),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
 def set_reply_error(reply_id: int, error_text: str, conn=None) -> None:
     """Set error_text on x_replies row so the reply is not retried until manually cleared."""
     own_conn = conn is None

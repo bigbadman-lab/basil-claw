@@ -108,15 +108,19 @@ def run_once() -> None:
             logger.info("DRY RUN enabled: will not post to X")
 
         cursor = db.get_cursor("mentions_since_id", conn=conn)
+        fetch_failed = False
         try:
             mentions = x_client.get_mentions(since_id=cursor, max_results=50)
         except Exception as e:
-            logger.error("X API get_mentions failed: %s", e)
-            conn.rollback()
-            conn.close()
-            sys.exit(1)
+            fetch_failed = True
+            mentions = []
+            err_str = str(e)
+            response = getattr(e, "response", None)
+            status_code = getattr(response, "status_code", None) if response else None
+            logger.info("mentions_fetch_failed status_code=%s error=%s", status_code, err_str)
+            db.set_fetch_error(err_str, conn=conn)
 
-        if not mentions:
+        if not mentions and not fetch_failed:
             logger.info("No new mentions.")
             _posting_enabled, _posting_disabled_until, _posting_disabled_reason = db.get_posting_state(conn=conn)
             _posted_last_hour = db.count_posts_last_hour(conn=conn)
@@ -137,22 +141,70 @@ def run_once() -> None:
             conn.commit()
             return
 
-        mentions_fetched = len(mentions)
-        mentions_sorted = sorted(mentions, key=lambda m: _numeric_id(m.get("tweet_id") or "0"))
-        newest_tweet_id = max((m.get("tweet_id") or "" for m in mentions_sorted), key=_numeric_id, default=cursor or "0")
-
-        from ingest.reply_engine import generate_reply_for_tweet
-
+        mentions_fetched = len(mentions) if mentions else 0
         drafts_created = 0
-        for m in mentions_sorted:
-            tweet_id = m.get("tweet_id") or ""
-            author_id = m.get("author_id") or ""
-            author_username = m.get("author_username") or ""
-            text = m.get("text") or ""
-            created_at = m.get("created_at")
-            raw_json = m.get("raw_json")
+        if mentions:
+            mentions_sorted = sorted(mentions, key=lambda m: _numeric_id(m.get("tweet_id") or "0"))
+            newest_tweet_id = max((m.get("tweet_id") or "" for m in mentions_sorted), key=_numeric_id, default=cursor or "0")
 
-            if author_id == X_USER_ID:
+            from ingest.reply_engine import generate_reply_for_tweet
+
+            for m in mentions_sorted:
+                tweet_id = m.get("tweet_id") or ""
+                author_id = m.get("author_id") or ""
+                author_username = m.get("author_username") or ""
+                text = m.get("text") or ""
+                created_at = m.get("created_at")
+                raw_json = m.get("raw_json")
+
+                if author_id == X_USER_ID:
+                    try:
+                        db.upsert_mention(
+                            tweet_id=tweet_id,
+                            author_id=author_id,
+                            author_username=author_username,
+                            text=text,
+                            created_at=created_at,
+                            raw_json=raw_json,
+                            status="skipped",
+                            conn=conn,
+                        )
+                    except Exception as e:
+                        logger.warning("upsert_mention (skipped self) failed for %s: %s", tweet_id, e)
+                    continue
+
+                if _is_retweet(text):
+                    try:
+                        db.upsert_mention(
+                            tweet_id=tweet_id,
+                            author_id=author_id,
+                            author_username=author_username,
+                            text=text,
+                            created_at=created_at,
+                            raw_json=raw_json,
+                            status="skipped",
+                            conn=conn,
+                        )
+                    except Exception as e:
+                        logger.warning("upsert_mention (skipped RT) failed for %s: %s", tweet_id, e)
+                    continue
+
+                if _is_empty_mention(text):
+                    try:
+                        db.upsert_mention(
+                            tweet_id=tweet_id,
+                            author_id=author_id,
+                            author_username=author_username,
+                            text=text,
+                            created_at=created_at,
+                            raw_json=raw_json,
+                            status="skipped",
+                            conn=conn,
+                        )
+                    except Exception as e:
+                        logger.warning("upsert_mention (skipped empty) failed for %s: %s", tweet_id, e)
+                    continue
+
                 try:
                     db.upsert_mention(
                         tweet_id=tweet_id,
@@ -161,103 +213,56 @@ def run_once() -> None:
                         text=text,
                         created_at=created_at,
                         raw_json=raw_json,
-                        status="skipped",
                         conn=conn,
                     )
                 except Exception as e:
-                    logger.warning("upsert_mention (skipped self) failed for %s: %s", tweet_id, e)
-                continue
+                    logger.warning("upsert_mention failed for %s: %s", tweet_id, e)
+                    continue
 
-            if _is_retweet(text):
+                if db.is_replied(tweet_id, conn=conn):
+                    continue
+
                 try:
-                    db.upsert_mention(
-                        tweet_id=tweet_id,
-                        author_id=author_id,
-                        author_username=author_username,
-                        text=text,
-                        created_at=created_at,
-                        raw_json=raw_json,
-                        status="skipped",
-                        conn=conn,
-                    )
+                    reply_text = generate_reply_for_tweet(text)
                 except Exception as e:
-                    logger.warning("upsert_mention (skipped RT) failed for %s: %s", tweet_id, e)
-                continue
+                    logger.warning("generate_reply_for_tweet failed for %s: %s", tweet_id, e)
+                    continue
 
-            if _is_empty_mention(text):
-                try:
-                    db.upsert_mention(
-                        tweet_id=tweet_id,
-                        author_id=author_id,
-                        author_username=author_username,
-                        text=text,
-                        created_at=created_at,
-                        raw_json=raw_json,
-                        status="skipped",
-                        conn=conn,
-                    )
-                except Exception as e:
-                    logger.warning("upsert_mention (skipped empty) failed for %s: %s", tweet_id, e)
-                continue
+                reply_text = _truncate_reply_to_limit(reply_text)
 
-            try:
-                db.upsert_mention(
-                    tweet_id=tweet_id,
-                    author_id=author_id,
-                    author_username=author_username,
-                    text=text,
-                    created_at=created_at,
-                    raw_json=raw_json,
-                    conn=conn,
-                )
-            except Exception as e:
-                logger.warning("upsert_mention failed for %s: %s", tweet_id, e)
-                continue
+                if X_DRY_RUN:
+                    try:
+                        db.insert_reply(
+                            in_reply_to_tweet_id=tweet_id,
+                            reply_tweet_id=None,
+                            reply_text=reply_text,
+                            decision="dry_run",
+                            conn=conn,
+                        )
+                        db.mark_mention_status(tweet_id, "drafted", conn=conn)
+                        drafts_created += 1
+                    except Exception as e:
+                        logger.warning("insert_reply/mark_mention_status (dry_run) failed for %s: %s", tweet_id, e)
+                    continue
 
-            if db.is_replied(tweet_id, conn=conn):
-                continue
-
-            try:
-                reply_text = generate_reply_for_tweet(text)
-            except Exception as e:
-                logger.warning("generate_reply_for_tweet failed for %s: %s", tweet_id, e)
-                continue
-
-            reply_text = _truncate_reply_to_limit(reply_text)
-
-            if X_DRY_RUN:
                 try:
                     db.insert_reply(
                         in_reply_to_tweet_id=tweet_id,
                         reply_tweet_id=None,
                         reply_text=reply_text,
-                        decision="dry_run",
+                        decision="drafted",
                         conn=conn,
                     )
                     db.mark_mention_status(tweet_id, "drafted", conn=conn)
                     drafts_created += 1
                 except Exception as e:
-                    logger.warning("insert_reply/mark_mention_status (dry_run) failed for %s: %s", tweet_id, e)
-                continue
+                    logger.warning("insert_reply (draft) failed for %s: %s", tweet_id, e)
 
-            try:
-                db.insert_reply(
-                    in_reply_to_tweet_id=tweet_id,
-                    reply_tweet_id=None,
-                    reply_text=reply_text,
-                    decision="drafted",
-                    conn=conn,
-                )
-                db.mark_mention_status(tweet_id, "drafted", conn=conn)
-                drafts_created += 1
-            except Exception as e:
-                logger.warning("insert_reply (draft) failed for %s: %s", tweet_id, e)
-
-        if newest_tweet_id and newest_tweet_id != cursor:
-            try:
-                db.set_cursor("mentions_since_id", newest_tweet_id, conn=conn)
-            except Exception as e:
-                logger.warning("set_cursor failed: %s", e)
+            if newest_tweet_id and newest_tweet_id != cursor:
+                try:
+                    db.set_cursor("mentions_since_id", newest_tweet_id, conn=conn)
+                except Exception as e:
+                    logger.warning("set_cursor failed: %s", e)
 
         posted_this_run = 0
         claimed_count = 0

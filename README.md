@@ -188,7 +188,7 @@ WHERE post_claimed_at IS NOT NULL
   AND post_claimed_at < now() - interval '10 minutes';
 ```
 
-**Cursor posting state (enabled/disabled, reason, until, consecutive failures):**
+**Cursor posting state (enabled/disabled, reason, until, consecutive failures, last fetch error):**
 
 ```sql
 SELECT
@@ -197,7 +197,9 @@ SELECT
   posting_disabled_at,
   posting_disabled_until,
   consecutive_post_failures,
-  last_post_error_at
+  last_post_error_at,
+  last_fetch_error_at,
+  last_fetch_error_text
 FROM x_cursor
 WHERE id = 1;
 ```
