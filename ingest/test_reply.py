@@ -10,7 +10,7 @@ from ingest.reply_engine import classify_intent, generate_reply_for_tweet
 
 
 def main():
-    test_tweet = "what do you think about elon musk?"
+    test_tweet = "What is Restore Britain’s immigration policy?"
     intent = classify_intent(test_tweet)
     print(f"\nIntent = {intent}")
 

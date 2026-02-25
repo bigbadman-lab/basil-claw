@@ -32,6 +32,14 @@ MISSION_HOOKS = [
 
 def classify_intent(text: str) -> str:
     t = text.lower().strip()
+    about_basil_phrases = [
+        "who are you", "what are you", "where are you from", "bexleyheath",
+        "who made you", "who created you", "who built you",
+        "are you conservative", "conservative",
+        "rupert lowe", "do you support rupert lowe", "who do you support",
+    ]
+    if any(p in t for p in about_basil_phrases):
+        return "about_basil"
     casual_patterns = [
         r"\bgm\b", r"\bgn\b", r"\blol\b", r"\blmao\b", r"\bhiya\b", r"\bhey\b",
         r"how are you", r"how r u", r"u ok", r"what's up", r"whats up",
@@ -60,7 +68,14 @@ def embed_query(text: str) -> List[float]:
     return resp.data[0].embedding
 
 
-def retrieve_chunks(conn, query_vec: List[float], query_text: str, k: int = 6) -> List[Tuple[int, str, str]]:
+def retrieve_chunks(
+    conn,
+    query_vec: List[float],
+    query_text: str,
+    k: int = 6,
+    only_canon_or_basil_about: bool = False,
+    exclude_basil_about: bool = False,
+) -> List[Tuple[int, str, str]]:
     """Returns list of (chunk_id, source_title, chunk_text)."""
     DEBUG_RETRIEVAL = False
     BEST_MATCH_MAX = 0.85
@@ -99,39 +114,40 @@ def retrieve_chunks(conn, query_vec: List[float], query_text: str, k: int = 6) -
         name_where = ""
         if ("musk" in qt) or ("elon" in qt):
             name_where = f" AND (COALESCE(s.title,'') ILIKE '%%musk%%' OR COALESCE(s.title,'') ILIKE '%%elon%%' OR c.{text_col} ILIKE '%%musk%%' OR c.{text_col} ILIKE '%%elon%%')"
-        where_model = f" AND e.{model_col} = %s" if filter_by_model else ""
+        if only_canon_or_basil_about:
+            name_where += f" AND (COALESCE(s.title,'') ILIKE '%%basil_about%%' OR COALESCE(s.title,'') ILIKE '%%Basil Canon%%' OR ({source_type_expr})::text ILIKE 'canon')"
+        if exclude_basil_about:
+            name_where += " AND COALESCE(s.title,'') NOT ILIKE '%basil_about%'"
+        esc_model = EMBED_MODEL.replace("'", "''") if filter_by_model else ""
+        where_model = f" AND e.{model_col} = '{esc_model}'" if filter_by_model else ""
 
+        qvec_str = "[" + ",".join(str(float(x)) for x in query_vec) + "]"
+        qvec_literal = "'" + qvec_str + "'::vector"
         sql_cosine = f"""
             SELECT e.chunk_id, COALESCE(s.title, 'Unknown Source') as source_title, c.{text_col} as chunk_text,
-                   (e.{vec_col} <=> (%s)::vector) as distance, {source_type_expr} as source_type
+                   (e.{vec_col} <=> {qvec_literal}) as distance, {source_type_expr} as source_type
             FROM embeddings e
             JOIN chunks c ON c.id = e.chunk_id
             LEFT JOIN sources s ON s.id = c.source_id
             WHERE 1=1{where_model}{name_where}
-            ORDER BY e.{vec_col} <=> (%s)::vector
-            LIMIT %s
+            ORDER BY e.{vec_col} <=> {qvec_literal}
+            LIMIT {candidate_limit}
         """
         sql_l2 = f"""
             SELECT e.chunk_id, COALESCE(s.title, 'Unknown Source') as source_title, c.{text_col} as chunk_text,
-                   (e.{vec_col} <-> (%s)::vector) as distance, {source_type_expr} as source_type
+                   (e.{vec_col} <-> {qvec_literal}) as distance, {source_type_expr} as source_type
             FROM embeddings e
             JOIN chunks c ON c.id = e.chunk_id
             LEFT JOIN sources s ON s.id = c.source_id
             WHERE 1=1{where_model}{name_where}
-            ORDER BY e.{vec_col} <-> (%s)::vector
-            LIMIT %s
+            ORDER BY e.{vec_col} <-> {qvec_literal}
+            LIMIT {candidate_limit}
         """
-        if filter_by_model:
-            params_cosine = (query_vec, EMBED_MODEL, query_vec, candidate_limit)
-            params_l2 = (query_vec, EMBED_MODEL, query_vec, candidate_limit)
-        else:
-            params_cosine = (query_vec, query_vec, candidate_limit)
-            params_l2 = (query_vec, query_vec, candidate_limit)
         try:
-            cur.execute(sql_cosine, params_cosine)
+            cur.execute(sql_cosine)
         except Exception:
             conn.rollback()
-            cur.execute(sql_l2, params_l2)
+            cur.execute(sql_l2)
         rows = cur.fetchall()
 
     query_lower = (query_text or "").lower()
@@ -173,6 +189,26 @@ def retrieve_chunks(conn, query_vec: List[float], query_text: str, k: int = 6) -
     return chosen_filtered
 
 
+def get_basil_about_chunks(conn, limit: int = 8) -> List[Tuple[int, str, str]]:
+    """
+    Fetch chunks for the basil_about.md source only, by source title/locator.
+    No vector similarity; order by c.id, return first limit chunks.
+    Returns list of (chunk_id, source_title, chunk_text).
+    """
+    n = min(10, max(6, limit))
+    with conn.cursor() as cur:
+        sql = f"""
+            SELECT c.id, s.title, c.content
+            FROM chunks c
+            JOIN sources s ON s.id = c.source_id
+            WHERE s.title ILIKE '%basil_about%'
+            ORDER BY c.id
+            LIMIT {n}
+        """
+        cur.execute(sql)
+        return list(cur.fetchall())
+
+
 def load_basil_canon(conn) -> str:
     with conn.cursor() as cur:
         cur.execute("""
@@ -193,7 +229,7 @@ def load_basil_canon(conn) -> str:
 
 def _generate_reply(user_text: str, intent: str, retrieved: List[Tuple[int, str, str]], canon: str) -> str:
     context_block = ""
-    if retrieved and intent in ("policy_question", "other"):
+    if retrieved and intent in ("policy_question", "other", "about_basil"):
         lines = [f"[{cid}] {st}\n{ct}" for (cid, st, ct) in retrieved]
         context_block = "\n\n".join(lines)
     hook_hint = ""
@@ -245,9 +281,15 @@ def generate_reply_for_tweet(user_text: str) -> str:
         canon = load_basil_canon(conn)
         intent = classify_intent(user_text)
         retrieved: List[Tuple[int, str, str]] = []
-        if intent in ("policy_question", "other"):
-            qvec = embed_query(user_text)
-            retrieved = retrieve_chunks(conn, qvec, user_text, k=6)
+        if intent in ("policy_question", "other", "about_basil"):
+            if intent == "about_basil":
+                retrieved = get_basil_about_chunks(conn, limit=8)
+            elif intent == "policy_question":
+                qvec = embed_query(user_text)
+                retrieved = retrieve_chunks(conn, qvec, user_text, k=6, exclude_basil_about=True)
+            else:
+                qvec = embed_query(user_text)
+                retrieved = retrieve_chunks(conn, qvec, user_text, k=6)
         return _generate_reply(user_text, intent, retrieved, canon)
     finally:
         conn.close()
