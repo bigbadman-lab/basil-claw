@@ -1,3 +1,5 @@
+![Basil Clawthorne Banner](assets/basil_banner.png)
+
 # Basil Clawthorne 🦞
 
 A retrieval-grounded AI reply agent with a canon-driven Victorian parliamentary persona.
