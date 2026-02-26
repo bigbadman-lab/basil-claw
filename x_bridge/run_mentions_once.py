@@ -310,18 +310,34 @@ def run_once() -> None:
                         err_str = str(e)
                         response = getattr(e, "response", None)
                         status_code = getattr(response, "status_code", None) if response else None
-                        db.set_reply_error(reply_id, err_str, conn=conn)
+                        X_403_REPLY_NOT_ALLOWED = (
+                            "Reply to this conversation is not allowed because you have not been "
+                            "mentioned or otherwise engaged by the author of the post you are replying to."
+                        )
                         if status_code == 429:
+                            db.set_reply_error(reply_id, err_str, conn=conn)
                             db.disable_posting("rate_limited_429", timedelta(minutes=60), conn=conn)
                             logger.info("posting_disabled_429")
+                        elif status_code == 403 and X_403_REPLY_NOT_ALLOWED in err_str:
+                            db.set_reply_blocked(
+                                reply_id, "x_reply_not_allowed", err_str, conn=conn
+                            )
+                            logger.warning(
+                                "post_reply blocked (reply not allowed) for mention %s: %s",
+                                mention_tweet_id,
+                                e,
+                            )
                         elif status_code == 403:
+                            db.set_reply_error(reply_id, err_str, conn=conn)
                             db.disable_posting("forbidden_403", None, conn=conn)
                             logger.info("posting_disabled_403")
                         else:
+                            db.set_reply_error(reply_id, err_str, conn=conn)
                             db.record_post_failure(err_str, conn=conn)
                             if db.get_consecutive_post_failures(conn=conn) >= 3:
                                 db.disable_posting("repeated_failures", timedelta(minutes=30), conn=conn)
-                        logger.warning("post_reply failed for mention %s: %s", mention_tweet_id, e)
+                        if status_code != 403 or X_403_REPLY_NOT_ALLOWED not in err_str:
+                            logger.warning("post_reply failed for mention %s: %s", mention_tweet_id, e)
 
         posted_last_hour_end = db.count_posts_last_hour(conn=conn)
         posting_enabled_end, posting_disabled_until_end, posting_disabled_reason_end = db.get_posting_state(conn=conn)

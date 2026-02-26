@@ -443,6 +443,28 @@ def set_fetch_error(error_text: str, conn=None) -> None:
             c.close()
 
 
+def set_reply_blocked(reply_id: int, block_reason: str, error_text: str, conn=None) -> None:
+    """Set x_replies row to decision='blocked', block_reason, error_text, and clear claim so it is not retried."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_replies
+                SET decision = 'blocked', block_reason = %s, error_text = %s,
+                    post_claimed_at = NULL, post_claimed_by = NULL
+                WHERE id = %s
+                """,
+                (block_reason, error_text, reply_id),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
 def set_reply_error(reply_id: int, error_text: str, conn=None) -> None:
     """Set error_text on x_replies row so the reply is not retried until manually cleared."""
     own_conn = conn is None

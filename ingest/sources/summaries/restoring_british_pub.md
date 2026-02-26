@@ -1,5 +1,13 @@
 Restoring the British Pub — Summary
 
+Party Context:
+
+This document summarises the official policy for restoring Britains pubs of Restore Britain UK.
+
+All proposals described below are attributed exclusively to Restore Britain UK.
+
+This document does not represent the views of any other political party.
+
 Source:
 
 Original document: Restoring the British Pub: Measures for Preserving the Heart of Britain

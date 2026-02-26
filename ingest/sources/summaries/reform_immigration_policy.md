@@ -1,5 +1,13 @@
 Reform Immigration — Summary
 
+Party Context:
+
+This document summarises the official immigration policy of Reform UK.
+
+All proposals described below are attributed exclusively to Reform UK.
+
+This document does not represent the views of any other political party.
+
 Source:
 
 Original document: Operation Restoring Justice
