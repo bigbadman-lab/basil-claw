@@ -373,7 +373,7 @@ def run_once() -> None:
                                 db.set_target_reply_error(in_reply_to_tweet_id, err_str, conn=conn)
                             db.disable_posting("rate_limited_429", timedelta(minutes=60), conn=conn)
                             logger.info("posting_disabled_429")
-                        elif status_code == 403 and X_403_REPLY_NOT_ALLOWED in err_str:
+                        elif X_403_REPLY_NOT_ALLOWED in err_str:
                             # NON_FATAL: do not increment repeated_failures or disable posting; mark candidate blocked and continue.
                             if kind == "mention":
                                 db.set_reply_blocked(id_for_log, "x_403_reply_not_allowed", err_str, conn=conn)
