@@ -213,19 +213,16 @@ def get_reply_posted_at(mention_tweet_id: str, conn=None) -> Any:
 
 
 def count_posts_last_hour(conn=None) -> int:
-    """Return count of posts in the last hour: x_replies (mention replies) + x_target_replies (whitelist)."""
+    """Return count of x_replies rows with reply_tweet_id set and posted_at in the last hour.
+    Whitelist replies are stored in x_replies with source='whitelist', so a separate table is unnecessary."""
     own_conn = conn is None
     c = conn or _connect()
     try:
         with c.cursor() as cur:
             cur.execute(
                 """
-                SELECT
-                    (SELECT COUNT(*) FROM x_replies
-                     WHERE reply_tweet_id IS NOT NULL AND posted_at >= now() - interval '1 hour')
-                    +
-                    (SELECT COUNT(*) FROM x_target_replies
-                     WHERE posted_at IS NOT NULL AND posted_at >= now() - interval '1 hour')
+                SELECT COUNT(*) FROM x_replies
+                WHERE reply_tweet_id IS NOT NULL AND posted_at >= now() - interval '1 hour'
                 """
             )
             row = cur.fetchone()
