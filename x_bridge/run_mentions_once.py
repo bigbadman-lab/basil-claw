@@ -171,30 +171,6 @@ def run_once() -> None:
 
         if not mentions and not fetch_failed:
             logger.info("No new mentions.")
-            now_utc = datetime.now(timezone.utc)
-            _posting_disabled_until, _posting_disabled_reason = db.apply_expired_disable_clear(conn=conn)
-            _disable_active = _posting_disabled_until is not None and now_utc < _posting_disabled_until
-            _posting_enabled = _posting_enabled_env and not _disable_active
-            _posted_last_hour = db.count_posts_last_hour(conn=conn)
-            _extra = ""
-            if not _posting_enabled and _posting_disabled_reason:
-                _extra = " posting_disabled_reason=%s posting_disabled_until=%s" % (
-                    _posting_disabled_reason,
-                    _posting_disabled_until,
-                )
-            logger.info(
-                "run_end mentions_fetched=0 drafts_created=0 claimed=0 posted_this_run=0 allowed_this_run=%s posted_last_hour=%s hourly_post_cap=%s posting_enabled=%s whitelist_targets_inserted=%s whitelist_drafts_created=%s whitelist_skipped=%s%s",
-                allowed_this_run,
-                _posted_last_hour,
-                hourly_post_cap,
-                _posting_enabled,
-                whitelist_targets_inserted,
-                whitelist_drafts_created,
-                whitelist_skipped,
-                _extra,
-            )
-            conn.commit()
-            return
 
         mentions_fetched = len(mentions) if mentions else 0
         drafts_created = 0
@@ -323,6 +299,7 @@ def run_once() -> None:
             try:
                 from x_bridge import run_whitelist_once as whitelist
 
+                logger.info("whitelist_run_start (mentions_fetched=%s)", mentions_fetched)
                 # Drafting (incl. numbers_safe 4-tuple/constraints) is handled inside run_ingest_and_draft.
                 whitelist_targets_inserted, whitelist_drafts_created, whitelist_skipped = whitelist.run_ingest_and_draft(conn)
             except Exception as e:
