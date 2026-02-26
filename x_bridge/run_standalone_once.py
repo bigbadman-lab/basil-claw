@@ -87,9 +87,13 @@ def run_once() -> None:
 
         # Same global bot enabled / auto-disabled state as run_mentions_once (skip in dry-run so we always generate)
         if not X_DRY_RUN:
-            posting_enabled, posting_disabled_until, posting_disabled_reason = db.get_posting_state(conn=conn)
+            now_utc = datetime.now(timezone.utc)
+            posting_disabled_until, posting_disabled_reason = db.apply_expired_disable_clear(conn=conn)
+            _posting_enabled_env = (os.getenv("X_POSTING_ENABLED") or "").strip().lower() in ("1", "true", "yes")
+            disable_active = posting_disabled_until is not None and now_utc < posting_disabled_until
+            posting_enabled = _posting_enabled_env and not disable_active
             if not posting_enabled:
-                if posting_disabled_until is not None and posting_disabled_until > datetime.now(timezone.utc):
+                if disable_active:
                     logger.info("run_skipped posting_disabled cooldown until=%s", posting_disabled_until)
                 else:
                     logger.info("run_skipped posting_disabled reason=%s", posting_disabled_reason or "unknown")
@@ -268,7 +272,17 @@ def run_once() -> None:
                 db.disable_posting("forbidden_403", None, conn=conn)
                 logger.info("posting_disabled_403")
             else:
-                if db.get_consecutive_post_failures(conn=conn) >= 3:
+                failures_in_window = db.get_consecutive_post_failures(conn=conn)
+                if failures_in_window >= 3:
+                    _msg_trunc = (err_str[:200] + "...") if len(err_str or "") > 200 else (err_str or "")
+                    logger.info(
+                        "posting_disabled_repeated_failures action_type=standalone last_exception_class=%s last_http_status=%s last_error_message=%s failures_in_window=%s window_minutes=%s",
+                        type(e).__name__,
+                        status_code,
+                        _msg_trunc,
+                        failures_in_window,
+                        None,
+                    )
                     db.disable_posting("repeated_failures", timedelta(minutes=30), conn=conn)
             conn.commit()
             logger.warning("standalone_post_failed reply_id=%s error=%s", reply_id, e)

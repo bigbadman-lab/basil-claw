@@ -6,11 +6,14 @@ Optional conn= allows running all operations in a single transaction (e.g. under
 """
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import psycopg2
+
+logger = logging.getLogger(__name__)
 
 _DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -425,6 +428,30 @@ def re_enable_posting(conn=None) -> None:
     finally:
         if own_conn:
             c.close()
+
+
+def apply_expired_disable_clear(conn=None) -> tuple[Optional[Any], Optional[str]]:
+    """
+    Disable is active ONLY if posting_disabled_until is not null AND now_utc < posting_disabled_until.
+    If posting_disabled_until is null OR now_utc >= posting_disabled_until: allow posting, clear disable
+    state in DB (reason=NULL, until=NULL), log, and return (None, None).
+    Callers: disable_active = until is not None and now_utc < until;
+    posting_enabled = X_POSTING_ENABLED and not disable_active.
+    """
+    _enabled, posting_disabled_until, posting_disabled_reason = get_posting_state(conn=conn)
+    now_utc = datetime.now(timezone.utc)
+    # Not active when until is null or now >= until
+    if posting_disabled_until is None or now_utc >= posting_disabled_until:
+        if posting_disabled_reason is not None or posting_disabled_until is not None:
+            prev_reason, prev_until = posting_disabled_reason, posting_disabled_until
+            re_enable_posting(conn=conn)
+            logger.info(
+                "posting_reenabled reason=disable_expired prev_reason=%s prev_until=%s",
+                prev_reason,
+                prev_until,
+            )
+        return (None, None)
+    return (posting_disabled_until, posting_disabled_reason)
 
 
 def set_fetch_error(error_text: str, conn=None) -> None:

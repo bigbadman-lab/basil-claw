@@ -160,7 +160,10 @@ def run_once() -> None:
 
         if not mentions and not fetch_failed:
             logger.info("No new mentions.")
-            _posting_enabled, _posting_disabled_until, _posting_disabled_reason = db.get_posting_state(conn=conn)
+            now_utc = datetime.now(timezone.utc)
+            _posting_disabled_until, _posting_disabled_reason = db.apply_expired_disable_clear(conn=conn)
+            _disable_active = _posting_disabled_until is not None and now_utc < _posting_disabled_until
+            _posting_enabled = _posting_enabled_env and not _disable_active
             _posted_last_hour = db.count_posts_last_hour(conn=conn)
             _extra = ""
             if not _posting_enabled and _posting_disabled_reason:
@@ -318,22 +321,13 @@ def run_once() -> None:
         claimed_count = 0
         can_post = True
         if not X_DRY_RUN:
-            posting_enabled, posting_disabled_until, posting_disabled_reason = db.get_posting_state(conn=conn)
-            if posting_enabled:
-                can_post = True
-            elif posting_disabled_until is not None and posting_disabled_until > datetime.now(timezone.utc):
+            now_utc = datetime.now(timezone.utc)
+            posting_disabled_until, posting_disabled_reason = db.apply_expired_disable_clear(conn=conn)
+            # posting_enabled = X_POSTING_ENABLED AND (disable not active). Disable active only when now_utc < posting_disabled_until.
+            disable_active = posting_disabled_until is not None and now_utc < posting_disabled_until
+            can_post = _posting_enabled_env and not disable_active
+            if disable_active:
                 logger.info("posting_cooldown_active")
-                can_post = False
-            elif (
-                posting_disabled_until is not None
-                and posting_disabled_until <= datetime.now(timezone.utc)
-                and posting_disabled_reason == "rate_limited_429"
-            ):
-                db.re_enable_posting(conn=conn)
-                logger.info("posting_reenabled_after_cooldown")
-                can_post = True
-            else:
-                can_post = False
 
         X_403_REPLY_NOT_ALLOWED = (
             "Reply to this conversation is not allowed because you have not been "
@@ -418,7 +412,17 @@ def run_once() -> None:
                             else:
                                 db.set_target_reply_error(in_reply_to_tweet_id, err_str, conn=conn)
                             db.record_post_failure(err_str, conn=conn)
-                            if db.get_consecutive_post_failures(conn=conn) >= 3:
+                            failures_in_window = db.get_consecutive_post_failures(conn=conn)
+                            if failures_in_window >= 3:
+                                _msg_trunc = (err_str[:200] + "...") if len(err_str or "") > 200 else (err_str or "")
+                                logger.info(
+                                    "posting_disabled_repeated_failures action_type=reply last_exception_class=%s last_http_status=%s last_error_message=%s failures_in_window=%s window_minutes=%s",
+                                    type(e).__name__,
+                                    status_code,
+                                    _msg_trunc,
+                                    failures_in_window,
+                                    None,
+                                )
                                 db.disable_posting("repeated_failures", timedelta(minutes=30), conn=conn)
                         if status_code != 403 or X_403_REPLY_NOT_ALLOWED not in err_str:
                             logger.warning("post_reply failed for %s %s: %s", kind, in_reply_to_tweet_id, e)
@@ -434,7 +438,10 @@ def run_once() -> None:
                     post_one(target_tweet_id, reply_text, "whitelist", target_tweet_id)
 
         posted_last_hour_end = db.count_posts_last_hour(conn=conn)
-        posting_enabled_end, posting_disabled_until_end, posting_disabled_reason_end = db.get_posting_state(conn=conn)
+        now_utc_end = datetime.now(timezone.utc)
+        posting_disabled_until_end, posting_disabled_reason_end = db.apply_expired_disable_clear(conn=conn)
+        disable_active_end = posting_disabled_until_end is not None and now_utc_end < posting_disabled_until_end
+        posting_enabled_end = _posting_enabled_env and not disable_active_end
         extra_disabled = ""
         if not posting_enabled_end and posting_disabled_reason_end:
             extra_disabled = " posting_disabled_reason=%s posting_disabled_until=%s" % (
