@@ -139,6 +139,9 @@ def run_once() -> None:
             whitelist_reply_prob_default,
             whitelist_reply_max_age_minutes,
         )
+        if not X_DRY_RUN:
+            logger.info("X_POSTING_ENABLED_env_raw=%s", os.getenv("X_POSTING_ENABLED"))
+            logger.info("WHITELIST_REPLY_MAX_AGE_MINUTES_env_raw=%s", os.getenv("WHITELIST_REPLY_MAX_AGE_MINUTES"))
         if X_DRY_RUN:
             logger.info("DRY RUN enabled: will not post to X")
 
