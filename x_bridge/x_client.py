@@ -151,7 +151,7 @@ def get_user_tweets(
     kwargs = {
         "id": user_id.strip(),
         "max_results": min(100, max(5, max_results)),
-        "tweet_fields": ["created_at", "author_id", "referenced_tweets", "reply_settings"],
+        "tweet_fields": ["created_at", "author_id", "referenced_tweets", "reply_settings", "conversation_id"],
         "expansions": ["author_id"],
         "user_fields": ["username"],
         "user_auth": True,
@@ -181,6 +181,7 @@ def get_user_tweets(
         created_at = getattr(t, "created_at", None) or (t.get("created_at") if isinstance(t, dict) else None)
         refs = getattr(t, "referenced_tweets", None) or (t.get("referenced_tweets") if isinstance(t, dict) else None) or []
         reply_settings = getattr(t, "reply_settings", None) or (t.get("reply_settings") if isinstance(t, dict) else None)
+        conversation_id = getattr(t, "conversation_id", None) or (t.get("conversation_id") if isinstance(t, dict) else None)
         author_username = None
         if author_id:
             u = users_by_id.get(str(author_id))
@@ -195,6 +196,7 @@ def get_user_tweets(
             "created_at": created_at,
             "referenced_tweets": refs,
             "reply_settings": str(reply_settings) if reply_settings is not None else None,
+            "conversation_id": str(conversation_id) if conversation_id is not None else None,
             "raw_json": raw_json,
         })
     return out

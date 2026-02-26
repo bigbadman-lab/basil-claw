@@ -129,6 +129,12 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
                 skipped += 1
                 continue
 
+            conversation_id = t.get("conversation_id")
+            if str(tweet_id) != str(conversation_id or ""):
+                logger.info("whitelist_skip_not_root tweet_id=%s", tweet_id)
+                skipped += 1
+                continue
+
             db.upsert_target(
                 tweet_id=tweet_id,
                 source="whitelist",
