@@ -326,6 +326,32 @@ def disable_posting(reason: str, until: Optional[timedelta] = None, conn=None) -
             c.close()
 
 
+def enable_posting(conn=None) -> None:
+    """
+    Clears any posting-disabled state in persistent DB, re-enabling posting.
+    Sets posting_enabled = true and clears posting_disabled_reason, posting_disabled_at, posting_disabled_until.
+    """
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_cursor
+                SET posting_enabled = true,
+                    posting_disabled_reason = NULL,
+                    posting_disabled_at = NULL,
+                    posting_disabled_until = NULL
+                WHERE id = 1
+                """
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
 def record_post_success(conn=None) -> None:
     """Reset consecutive_post_failures to 0 on x_cursor (row id=1)."""
     own_conn = conn is None

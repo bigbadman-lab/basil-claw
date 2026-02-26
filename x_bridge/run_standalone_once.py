@@ -80,6 +80,18 @@ def run_once() -> None:
         logger.info("advisory_lock_acquired key=%s", db.ADVISORY_LOCK_KEY_STANDALONE)
         db.ensure_standalone_state_table(conn=conn)
 
+        now_utc = datetime.now(timezone.utc)
+        _pg_until, _pg_reason = db.apply_expired_disable_clear(conn=conn)
+        _pg_disable_active = _pg_until is not None and now_utc < _pg_until
+        _pg_env = (os.getenv("X_POSTING_ENABLED") or "").strip().lower() in ("1", "true", "yes")
+        _pg_effective = _pg_env and not _pg_disable_active
+        logger.info(
+            "posting_gate posting_enabled=%s posting_disabled_reason=%s posting_disabled_until=%s",
+            _pg_effective,
+            _pg_reason,
+            _pg_until,
+        )
+
         if not X_DRY_RUN and not config.standalone_post_enabled:
             logger.info("run_skipped standalone_post_enabled=false")
             conn.commit()

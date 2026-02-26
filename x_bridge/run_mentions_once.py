@@ -145,6 +145,17 @@ def run_once() -> None:
         if X_DRY_RUN:
             logger.info("DRY RUN enabled: will not post to X")
 
+        now_utc = datetime.now(timezone.utc)
+        _pg_until, _pg_reason = db.apply_expired_disable_clear(conn=conn)
+        _pg_disable_active = _pg_until is not None and now_utc < _pg_until
+        _pg_effective = _posting_enabled_env and not _pg_disable_active
+        logger.info(
+            "posting_gate posting_enabled=%s posting_disabled_reason=%s posting_disabled_until=%s",
+            _pg_effective,
+            _pg_reason,
+            _pg_until,
+        )
+
         cursor = db.get_cursor("mentions_since_id", conn=conn)
         fetch_failed = False
         try:
