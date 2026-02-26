@@ -229,3 +229,19 @@ def post_reply(text: str, in_reply_to_tweet_id: str) -> str:
         raise RuntimeError(f"Unexpected X API response: {resp}")
 
     return str(reply_id)
+
+
+def post_tweet(text: str) -> str:
+    """
+    Post a new tweet (no reply) using X API v2.
+    Returns the new tweet ID.
+    """
+    client = get_v2_client()
+    resp = client.create_tweet(text=text, user_auth=True)
+    if not resp or not getattr(resp, "data", None):
+        raise RuntimeError(f"Unexpected X API response: {resp}")
+    data = resp.data
+    tweet_id = getattr(data, "id", None) or (data.get("id") if isinstance(data, dict) else None)
+    if tweet_id is None:
+        raise RuntimeError(f"Unexpected X API response: {resp}")
+    return str(tweet_id)

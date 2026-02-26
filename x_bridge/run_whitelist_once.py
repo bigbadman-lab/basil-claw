@@ -9,6 +9,7 @@ Requires: DATABASE_URL, X_* env vars. Uses WHITELIST_REPLY_MAX_AGE_MINUTES (defa
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -153,24 +154,45 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
         )
 
     targets_processed = 0
+    numbers_safe_drafts_created = 0
     if whitelist_reply_enabled:
         from ingest.reply_engine import generate_reply_whitelist_text
 
         from x_bridge.whitelist_reply_heuristics import whitelist_should_reply_and_persist
 
+        def _reply_contains_digit(text: str) -> bool:
+            return bool(text and re.search(r"\d", text))
+
         unreplied = db.list_unreplied_targets(limit=50, conn=conn)
         for row in unreplied:
             tweet_id, _source, _author_user_id, _author_handle, tweet_text, _tweet_created_at, _inserted_at, _raw_json = row
             targets_processed += 1
-            decision, _score, reason = whitelist_should_reply_and_persist(tweet_id, tweet_text, conn=conn)
+            decision, _score, _reason, constraints = whitelist_should_reply_and_persist(tweet_id, tweet_text, conn=conn)
             if decision == "skip":
                 targets_skipped += 1
                 continue
+            needs_numbers_safe = constraints.get("needs_numbers_safe_reply", False)
             try:
-                reply_text = generate_reply_whitelist_text(tweet_text, conn)
+                reply_text = generate_reply_whitelist_text(tweet_text, conn, needs_numbers_safe_reply=needs_numbers_safe)
             except Exception as e:
                 logger.warning("whitelist_draft_error tweet_id=%s error=%s", tweet_id, e)
                 continue
+            if needs_numbers_safe and _reply_contains_digit(reply_text):
+                try:
+                    reply_text = generate_reply_whitelist_text(tweet_text, conn, needs_numbers_safe_reply=True)
+                except Exception as e:
+                    logger.warning("whitelist_draft_retry_error tweet_id=%s error=%s", tweet_id, e)
+                if _reply_contains_digit(reply_text):
+                    db.upsert_target_reply(
+                        target_tweet_id=tweet_id,
+                        reply_text=None,
+                        decision="blocked",
+                        block_reason="whitelist_skip:numbers_reply_failed",
+                        source="whitelist",
+                        conn=conn,
+                    )
+                    targets_skipped += 1
+                    continue
             decision_str = "dry_run" if x_dry_run else "drafted"
             db.insert_whitelist_reply(
                 target_tweet_id=tweet_id,
@@ -179,11 +201,14 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
                 conn=conn,
             )
             drafts_created += 1
+            if needs_numbers_safe:
+                numbers_safe_drafts_created += 1
         logger.info(
-            "whitelist_unreplied targets_processed=%s drafts_created=%s targets_skipped=%s",
+            "whitelist_unreplied targets_processed=%s drafts_created=%s targets_skipped=%s numbers_safe_drafts=%s",
             targets_processed,
             drafts_created,
             targets_skipped,
+            numbers_safe_drafts_created,
         )
 
     return (targets_inserted, drafts_created, targets_skipped)

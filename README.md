@@ -134,6 +134,36 @@ python ingest/test_reply.py
 
 Edit the `test_tweet` variable in `main()` to try different queries. No X posting; local only.
 
+### 5. Unit tests and standalone dry-run
+
+**Run unit tests** (policy_retrieval, filters, basil_moment; tests use mocks, no DB/network required):
+
+```bash
+make test
+```
+
+Or run each test module directly:
+
+```bash
+python3 -m tests.test_policy_retrieval
+python3 -m tests.test_filters
+python3 -m tests.test_basil_moment
+```
+
+**Standalone post dry-run** — generate one standalone post and print it (no posting). Uses `DRY_RUN=1` or `X_DRY_RUN=1`; bypasses interval and posting-enabled checks. Requires `DATABASE_URL` and `OPENAI_API_KEY` in `.env`:
+
+```bash
+make standalone-dry-run
+```
+
+Or:
+
+```bash
+X_DRY_RUN=1 python3 -m x_bridge.run_standalone_once
+```
+
+Output includes `mode`, `angle` (if policy), `filter_result` (passed or rejected), and the generated post text.
+
 ## Project Structure
 
 ```

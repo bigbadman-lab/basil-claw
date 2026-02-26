@@ -8,7 +8,7 @@ Uses DATABASE_URL, OPENAI_API_KEY, EMBEDDING_MODEL, CHAT_MODEL.
 import os
 import re
 import random
-from typing import List, Tuple, Dict, Any
+from typing import Any, Dict, List, Tuple, Union
 
 import psycopg2
 from openai import OpenAI
@@ -75,13 +75,15 @@ def retrieve_chunks(
     k: int = 6,
     only_canon_or_basil_about: bool = False,
     exclude_basil_about: bool = False,
-) -> List[Tuple[int, str, str]]:
-    """Returns list of (chunk_id, source_title, chunk_text)."""
+    return_counts: bool = False,
+) -> Union[List[Tuple[int, str, str]], Tuple[List[Tuple[int, str, str]], Dict[str, Any]]]:
+    """Returns list of (chunk_id, source_title, chunk_text). If return_counts=True, returns (list, {total_candidates, after_filters, retrieved_rows_count, first_row_*})."""
     DEBUG_RETRIEVAL = False
     BEST_MATCH_MAX = 0.85
     KEEP_MATCH_MAX = 0.92
     ENTITY_BONUS = 0.18
     candidate_limit = 20
+    counts: Dict[str, Any] = {}
     with conn.cursor() as cur:
         cur.execute("""
             SELECT column_name FROM information_schema.columns
@@ -121,6 +123,13 @@ def retrieve_chunks(
         esc_model = EMBED_MODEL.replace("'", "''") if filter_by_model else ""
         where_model = f" AND e.{model_col} = '{esc_model}'" if filter_by_model else ""
 
+        if return_counts:
+            base_from = f"FROM embeddings e JOIN chunks c ON c.id = e.chunk_id LEFT JOIN sources s ON s.id = c.source_id"
+            cur.execute(f"SELECT COUNT(*) {base_from} WHERE 1=1{where_model}")
+            counts["total_candidates"] = int(cur.fetchone()[0])
+            cur.execute(f"SELECT COUNT(*) {base_from} WHERE 1=1{where_model}{name_where}")
+            counts["after_filters"] = int(cur.fetchone()[0])
+
         qvec_str = "[" + ",".join(str(float(x)) for x in query_vec) + "]"
         qvec_literal = "'" + qvec_str + "'::vector"
         sql_cosine = f"""
@@ -150,6 +159,20 @@ def retrieve_chunks(
             cur.execute(sql_l2)
         rows = cur.fetchall()
 
+        if return_counts:
+            counts["retrieved_rows_count"] = len(rows)
+            counts["accepted_candidates_pre_filter"] = len(rows)
+            if rows:
+                r0 = rows[0]
+                chunk_text = r0[2] if len(r0) > 2 else None
+                counts["first_row_distance"] = float(r0[3]) if len(r0) > 3 else None
+                counts["first_row_text_empty"] = not (chunk_text or "").strip()
+                counts["first_row_text_len"] = len(chunk_text or "")
+
+    # Rejection counts for debug (only meaningful when return_counts=True)
+    rejected_empty_text = sum(1 for r in rows if not ((r[2] if len(r) > 2 else None) or "").strip()) if return_counts else 0
+    rejected_missing_fields = sum(1 for r in rows if (r[0] is None or r[1] is None)) if return_counts else 0
+
     query_lower = (query_text or "").lower()
     entity_terms = ("elon", "musk")
     query_has_entity = any(t in query_lower for t in entity_terms)
@@ -172,9 +195,12 @@ def retrieve_chunks(
     chosen: List[Tuple[int, str, str]] = []
     chosen_debug: List[Tuple[float, float, int, str]] = []
     per_source_count: Dict[str, int] = {}
+    rejected_doc_constraint = 0
     for adjusted_distance, raw_distance, chunk_id, source_title, chunk_text in weighted:
         n = per_source_count.get(source_title, 0)
         if n >= 2:
+            if return_counts:
+                rejected_doc_constraint += 1
             continue
         per_source_count[source_title] = n + 1
         chosen.append((chunk_id, source_title, chunk_text))
@@ -182,11 +208,29 @@ def retrieve_chunks(
         if len(chosen) >= k:
             break
     if not chosen:
-        return []
+        if return_counts:
+            counts["accepted_candidates_post_filter"] = 0
+            counts["rejected_empty_text"] = rejected_empty_text
+            counts["rejected_missing_fields"] = rejected_missing_fields
+            counts["rejected_distance_threshold"] = 0
+            counts["rejected_doc_constraint"] = rejected_doc_constraint
+        return ([], counts) if return_counts else []
     if chosen_debug[0][0] > BEST_MATCH_MAX:
-        return []
+        if return_counts:
+            counts["accepted_candidates_post_filter"] = 0
+            counts["rejected_empty_text"] = rejected_empty_text
+            counts["rejected_missing_fields"] = rejected_missing_fields
+            counts["rejected_distance_threshold"] = 1
+            counts["rejected_doc_constraint"] = rejected_doc_constraint
+        return ([], counts) if return_counts else []
     chosen_filtered = [chosen[i] for i in range(len(chosen)) if chosen_debug[i][0] <= KEEP_MATCH_MAX]
-    return chosen_filtered
+    if return_counts:
+        counts["accepted_candidates_post_filter"] = len(chosen_filtered)
+        counts["rejected_empty_text"] = rejected_empty_text
+        counts["rejected_missing_fields"] = rejected_missing_fields
+        counts["rejected_distance_threshold"] = len(chosen) - len(chosen_filtered)
+        counts["rejected_doc_constraint"] = rejected_doc_constraint
+    return (chosen_filtered, counts) if return_counts else chosen_filtered
 
 
 def get_basil_about_chunks(conn, limit: int = 8) -> List[Tuple[int, str, str]]:
@@ -271,29 +315,49 @@ Context:
     return resp.output_text.strip()
 
 
-def _generate_reply_whitelist(user_text: str, retrieved: List[Tuple[int, str, str]], canon: str) -> str:
-    """Whitelist style: max 2 sentences, 280 chars, witty/sharp/confident, no hashtags, at most one emoji (use sparingly), no ungrounded factual assertions."""
+_NUMBERS_SAFE_WHITELIST_RULES = """
+NUMBERS-SAFE MODE (target tweet contains digits/stats; your reply must not):
+- Your reply MUST NOT contain any digits (0-9).
+- Your reply MUST NOT introduce any statistics or quantitative claims.
+- You MAY challenge sourcing, definitions, framing, or enforcement.
+- Keep under 220 characters.
+- Basil voice: sharp, witty, combative; no personal abuse.
+"""
+
+
+def _generate_reply_whitelist(
+    user_text: str,
+    retrieved: List[Tuple[int, str, str]],
+    canon: str,
+    needs_numbers_safe_reply: bool = False,
+) -> str:
+    """Whitelist style: max 2 sentences, 280 chars, witty/sharp/confident, no hashtags, at most one emoji (use sparingly), no ungrounded factual assertions. If needs_numbers_safe_reply, reply must have no digits or stats."""
     context_block = ""
     if retrieved:
         lines = [f"[{cid}] {st}\n{ct}" for (cid, st, ct) in retrieved]
         context_block = "\n\n".join(lines)
-    system = """
-You are Basil Clawthorne. Follow the canon below strictly.
-
-CANON:
-{canon}
-
+    style_block = """
 STYLE (whitelist engagement):
 - Maximum 2 sentences. Maximum 280 characters total.
 - Witty, sharp, confident. Dry wit. Slightly mischievous.
 - No hashtags. No bullet points. No links.
 - At most one emoji; use only when it really fits (roughly 10% of the time).
 - Do not start with "One must acknowledge" or similar formal openers.
+""".strip()
+    if needs_numbers_safe_reply:
+        style_block += "\n\n" + _NUMBERS_SAFE_WHITELIST_RULES.strip()
+    system = """
+You are Basil Clawthorne. Follow the canon below strictly.
+
+CANON:
+{canon}
+
+{style_block}
 
 RULES:
 - Do not invent or assert factual claims unless they are clearly grounded in the retrieved context below.
 - If you cannot ground a fact from retrieval, phrase your point as opinion or a question instead.
-""".strip().format(canon=canon)
+""".strip().format(canon=canon, style_block=style_block)
     user = """
 Tweet: {user_text}
 
@@ -316,16 +380,21 @@ Context (use only to ground facts; otherwise be concise and sharp):
     return out
 
 
-def generate_reply_whitelist_text(user_text: str, conn) -> str:
+def generate_reply_whitelist_text(
+    user_text: str,
+    conn,
+    needs_numbers_safe_reply: bool = False,
+) -> str:
     """
     Generate a single Basil reply for whitelist engagement: same retrieval + canon as mentions,
     but with whitelist instruction set (max 2 sentences, 280 chars, witty/sharp, no ungrounded facts).
+    If needs_numbers_safe_reply is True, the reply must contain no digits and no statistics.
     Caller must pass an open DB connection (e.g. from psycopg2).
     """
     canon = load_basil_canon(conn)
     qvec = embed_query(user_text)
     retrieved = retrieve_chunks(conn, qvec, user_text, k=6)
-    return _generate_reply_whitelist(user_text, retrieved, canon)
+    return _generate_reply_whitelist(user_text, retrieved, canon, needs_numbers_safe_reply)
 
 
 def generate_reply_for_tweet(user_text: str) -> str:

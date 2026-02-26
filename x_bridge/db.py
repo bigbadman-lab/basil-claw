@@ -16,6 +16,8 @@ _DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # Advisory lock key for run_mentions_once: only one run holds this lock per transaction.
 ADVISORY_LOCK_KEY = 1234567890
+# Advisory lock key for run_standalone_once (separate so mentions and standalone can run in parallel).
+ADVISORY_LOCK_KEY_STANDALONE = 1234567891
 
 
 def _connect():
@@ -29,10 +31,11 @@ def get_connection():
     return _connect()
 
 
-def try_advisory_xact_lock(conn) -> bool:
+def try_advisory_xact_lock(conn, lock_key: Optional[int] = None) -> bool:
     """Try to acquire transaction-level advisory lock. Returns True if acquired. Lock held until commit/rollback."""
+    key = lock_key if lock_key is not None else ADVISORY_LOCK_KEY
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (ADVISORY_LOCK_KEY,))
+        cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (key,))
         row = cur.fetchone()
         return bool(row and row[0])
 
@@ -899,6 +902,216 @@ def set_target_reply_error(target_tweet_id: str, error_text: str, conn=None) -> 
             )
         if own_conn:
             c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def ensure_standalone_state_table(conn=None) -> None:
+    """Idempotent: create x_standalone_state if missing, insert seed row (id=true), add backoff columns if missing."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS x_standalone_state (
+                  id             BOOLEAN PRIMARY KEY DEFAULT true,
+                  last_posted_at TIMESTAMPTZ,
+                  last_post_hash TEXT,
+                  last_mode      TEXT,
+                  last_angle     TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO x_standalone_state (id) VALUES (true)
+                ON CONFLICT (id) DO NOTHING
+                """
+            )
+            for col in ("next_allowed_at", "last_standalone_error_at", "second_last_standalone_error_at"):
+                cur.execute(
+                    f"ALTER TABLE x_standalone_state ADD COLUMN IF NOT EXISTS {col} TIMESTAMPTZ"
+                )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def get_standalone_last_angle(conn=None) -> Optional[str]:
+    """Return last_angle from the single row in x_standalone_state, or None."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute("SELECT last_angle FROM x_standalone_state WHERE id = true")
+            row = cur.fetchone()
+            return str(row[0]).strip() if row and row[0] and str(row[0]).strip() else None
+    finally:
+        if own_conn:
+            c.close()
+
+
+def get_standalone_state(conn=None) -> dict:
+    """Return the single row of x_standalone_state as dict: last_posted_at, last_post_hash, last_mode, last_angle, next_allowed_at, last_standalone_error_at, second_last_standalone_error_at."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT last_posted_at, last_post_hash, last_mode, last_angle,
+                       next_allowed_at, last_standalone_error_at, second_last_standalone_error_at
+                FROM x_standalone_state WHERE id = true
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return {
+                    "last_posted_at": None,
+                    "last_post_hash": None,
+                    "last_mode": None,
+                    "last_angle": None,
+                    "next_allowed_at": None,
+                    "last_standalone_error_at": None,
+                    "second_last_standalone_error_at": None,
+                }
+            return {
+                "last_posted_at": row[0],
+                "last_post_hash": str(row[1]).strip() if row[1] and str(row[1]).strip() else None,
+                "last_mode": str(row[2]).strip() if row[2] and str(row[2]).strip() else None,
+                "last_angle": str(row[3]).strip() if row[3] and str(row[3]).strip() else None,
+                "next_allowed_at": row[4],
+                "last_standalone_error_at": row[5],
+                "second_last_standalone_error_at": row[6],
+            }
+    finally:
+        if own_conn:
+            c.close()
+
+
+def update_standalone_state(
+    conn=None,
+    *,
+    last_posted_at: Optional[Any] = None,
+    last_post_hash: Optional[str] = None,
+    last_mode: Optional[str] = None,
+    last_angle: Optional[str] = None,
+    next_allowed_at: Optional[Any] = None,
+    last_standalone_error_at: Optional[Any] = None,
+    second_last_standalone_error_at: Optional[Any] = None,
+) -> None:
+    """Update the single row in x_standalone_state. Pass only fields to set."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            updates = []
+            args = []
+            if last_posted_at is not None:
+                updates.append("last_posted_at = %s")
+                args.append(last_posted_at)
+            if last_post_hash is not None:
+                updates.append("last_post_hash = %s")
+                args.append(last_post_hash)
+            if last_mode is not None:
+                updates.append("last_mode = %s")
+                args.append(last_mode)
+            if last_angle is not None:
+                updates.append("last_angle = %s")
+                args.append(last_angle)
+            if next_allowed_at is not None:
+                updates.append("next_allowed_at = %s")
+                args.append(next_allowed_at)
+            if last_standalone_error_at is not None:
+                updates.append("last_standalone_error_at = %s")
+                args.append(last_standalone_error_at)
+            if second_last_standalone_error_at is not None:
+                updates.append("second_last_standalone_error_at = %s")
+                args.append(second_last_standalone_error_at)
+            if not updates:
+                return
+            args.append(True)
+            cur.execute(
+                "UPDATE x_standalone_state SET " + ", ".join(updates) + " WHERE id = %s",
+                tuple(args),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def record_standalone_posting_error(conn=None) -> None:
+    """
+    Record a standalone posting error and optionally set next_allowed_at.
+    If the last 2 standalone runs ended in posting errors within 30 minutes, set next_allowed_at = now() + 2 hours.
+    """
+    now = datetime.now(timezone.utc)
+    state = get_standalone_state(conn=conn)
+    last_err = state.get("last_standalone_error_at")
+    second_err = state.get("second_last_standalone_error_at")
+    # Shift: second = last, last = now
+    if last_err is not None and (now - last_err).total_seconds() <= 30 * 60:
+        # Two errors within 30 min -> backoff 2 hours
+        next_ok = now + timedelta(hours=2)
+        update_standalone_state(
+            conn=conn,
+            last_standalone_error_at=now,
+            second_last_standalone_error_at=last_err,
+            next_allowed_at=next_ok,
+        )
+    else:
+        update_standalone_state(
+            conn=conn,
+            last_standalone_error_at=now,
+            second_last_standalone_error_at=last_err,
+        )
+
+
+def clear_standalone_backoff(conn=None) -> None:
+    """Clear standalone error backoff (next_allowed_at and error timestamps) after a successful post."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_standalone_state
+                SET next_allowed_at = NULL, last_standalone_error_at = NULL, second_last_standalone_error_at = NULL
+                WHERE id = true
+                """
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def insert_standalone_reply(reply_text: str, conn=None) -> Optional[int]:
+    """Insert one x_replies row for a standalone post (mention_tweet_id and target_tweet_id NULL, source='standalone'). Returns id."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO x_replies (mention_tweet_id, target_tweet_id, reply_tweet_id, reply_text, decision, source)
+                VALUES (NULL, NULL, NULL, %s, 'drafted', 'standalone')
+                RETURNING id
+                """,
+                (reply_text,),
+            )
+            row = cur.fetchone()
+            reply_id = int(row[0]) if row and row[0] is not None else None
+        if own_conn:
+            c.commit()
+        return reply_id
     finally:
         if own_conn:
             c.close()

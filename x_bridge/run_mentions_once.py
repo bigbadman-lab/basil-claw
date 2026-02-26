@@ -306,6 +306,7 @@ def run_once() -> None:
             try:
                 from x_bridge import run_whitelist_once as whitelist
 
+                # Drafting (incl. numbers_safe 4-tuple/constraints) is handled inside run_ingest_and_draft.
                 whitelist_targets_inserted, whitelist_drafts_created, whitelist_skipped = whitelist.run_ingest_and_draft(conn)
             except Exception as e:
                 logger.warning("whitelist_ingest_draft_failed error=%s", e)

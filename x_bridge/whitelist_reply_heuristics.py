@@ -63,15 +63,18 @@ def _deterministic_random(tweet_id: str) -> float:
     return int(h[:14], 16) / (16**14)
 
 
-def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, str]:
+def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, str, dict]:
     """
     Heuristic score and decision for whether to reply to this whitelist target.
-    Returns (decision, score, reason) with decision in ("reply", "skip").
+    Returns (decision, score, reason, constraints) with decision in ("reply", "skip").
+    constraints may contain needs_numbers_safe_reply=True when the target tweet contains digits
+    (we do not auto-skip for digits; we tag for numbers-safe reply instead).
     Deterministic: same tweet_id always yields same decision.
     """
     text = (tweet_text or "").strip()
     score = 0.0
     reasons = []
+    constraints: dict = {}
 
     # -3 if very short or mostly links (apply first so we don't add positives to junk)
     link_matches = _LINK_PATTERN.findall(text)
@@ -95,10 +98,11 @@ def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, 
         score += 1
         reasons.append("claim")
 
-    # +1 numbers/percentages/currency
+    # numbers/percentages/currency: no score boost; tag for numbers-safe reply and small penalty to avoid over-targeting stat-heavy posts
     if _NUMBERS_PERCENT.search(text):
-        score += 1
-        reasons.append("numbers")
+        score -= 0.5
+        reasons.append("numbers_present")
+        constraints["needs_numbers_safe_reply"] = True
 
     # +1 controversy
     if _CONTROVERSY.search(text):
@@ -115,7 +119,7 @@ def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, 
         score -= 2
         reasons.append("celebration")
 
-    # Decision rules
+    # Decision rules (no auto-skip for digits)
     if "?" in text:
         decision = "reply"
         reason = "question;" + ";".join(reasons)
@@ -132,17 +136,20 @@ def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, 
         decision = "skip"
         reason = f"score={score:.1f};" + ";".join(reasons)
 
-    return (decision, score, reason)
+    return (decision, score, reason, constraints)
 
 
 def whitelist_should_reply_and_persist(
     tweet_id: str,
     tweet_text: str,
     conn: Any = None,
-) -> Tuple[str, float, str]:
+) -> Tuple[str, float, str, dict]:
     """
-    Compute reply decision, persist to x_targets (reply_decision, reply_score, reply_reason), return (decision, score, reason).
+    Compute reply decision, persist to x_targets (reply_decision, reply_score, reply_reason), return (decision, score, reason, constraints).
+    When decision is reply and constraints has needs_numbers_safe_reply, reply_reason is suffixed with ";numbers_safe".
     """
-    decision, score, reason = whitelist_should_reply(tweet_id, tweet_text)
+    decision, score, reason, constraints = whitelist_should_reply(tweet_id, tweet_text)
+    if decision == "reply" and constraints.get("needs_numbers_safe_reply"):
+        reason = reason + ";numbers_safe"
     db.update_target_reply_decision(tweet_id, decision, score, reason, conn=conn)
-    return (decision, score, reason)
+    return (decision, score, reason, constraints)

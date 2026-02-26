@@ -1,0 +1,16 @@
+# Render Blueprint: cron jobs for X bridge.
+# Env vars (DATABASE_URL, OPENAI_API_KEY, X_*, STANDALONE_*, etc.) are set in the Render dashboard or env group.
+# See README_X.md for required and optional variables.
+
+services:
+  # Mentions loop: fetch mentions, draft replies, post (respects MAX_POSTS_PER_RUN and HOURLY_POST_CAP).
+  - type: cron
+    name: x-bridge-mentions
+    schedule: "*/10 * * * *"
+    command: python3 -m x_bridge.run_mentions_once
+
+  # Standalone posts: policy or irreverent, at most one post per run; respects STANDALONE_POST_INTERVAL_MINUTES and HOURLY_POST_CAP.
+  - type: cron
+    name: x-bridge-standalone
+    schedule: "*/5 * * * *"
+    command: python3 -m x_bridge.run_standalone_once

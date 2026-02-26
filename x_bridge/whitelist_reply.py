@@ -4,6 +4,7 @@ Uses whitelist_reply_heuristics for decision and ingest.reply_engine for retriev
 Persists to x_targets (reply_decision/score/reason) and x_target_replies (draft or blocked).
 """
 
+import re
 from typing import Any, Optional
 
 from ingest.reply_engine import generate_reply_whitelist_text
@@ -12,15 +13,17 @@ from x_bridge import db
 from x_bridge.whitelist_reply_heuristics import whitelist_should_reply_and_persist
 
 
+def _reply_contains_digit(text: str) -> bool:
+    return bool(text and re.search(r"\d", text))
+
+
 def generate_reply_for_whitelist_target(target: dict, conn: Any = None) -> None:
     """
     For a whitelist target: compute reply decision (or use existing), persist to x_targets;
     if skip → insert x_target_replies with decision='blocked', block_reason='whitelist_skip:<reason>';
     if reply → generate draft via retrieval + OpenAI (whitelist instructions), insert x_target_replies
-    with decision='drafted', source='whitelist'.
-
-    target must have 'tweet_id' and 'tweet_text'. May have 'reply_decision', 'reply_score', 'reply_reason'
-    if already computed (e.g. by whitelist_should_reply_and_persist); otherwise we compute and persist.
+    with decision='drafted', source='whitelist'. When target has digits, uses numbers_safe mode
+    (no digits in reply); if reply still contains digits after one retry, blocks with numbers_reply_failed.
     """
     tweet_id = (target.get("tweet_id") or "").strip()
     tweet_text = (target.get("tweet_text") or "").strip()
@@ -35,8 +38,9 @@ def generate_reply_for_whitelist_target(target: dict, conn: Any = None) -> None:
         decision = target.get("reply_decision")
         score = target.get("reply_score")
         reason = target.get("reply_reason")
+        constraints = target.get("constraints") or {}
         if decision is None:
-            decision, score, reason = whitelist_should_reply_and_persist(tweet_id, tweet_text, conn=conn)
+            decision, score, reason, constraints = whitelist_should_reply_and_persist(tweet_id, tweet_text, conn=conn)
 
         if decision == "skip":
             db.upsert_target_reply(
@@ -51,8 +55,22 @@ def generate_reply_for_whitelist_target(target: dict, conn: Any = None) -> None:
                 conn.commit()
             return
 
-        # decision == "reply" -> generate draft
-        reply_text = generate_reply_whitelist_text(tweet_text, conn)
+        needs_numbers_safe = constraints.get("needs_numbers_safe_reply", False)
+        reply_text = generate_reply_whitelist_text(tweet_text, conn, needs_numbers_safe_reply=needs_numbers_safe)
+        if needs_numbers_safe and _reply_contains_digit(reply_text):
+            reply_text = generate_reply_whitelist_text(tweet_text, conn, needs_numbers_safe_reply=True)
+            if _reply_contains_digit(reply_text):
+                db.upsert_target_reply(
+                    target_tweet_id=tweet_id,
+                    reply_text=None,
+                    decision="blocked",
+                    block_reason="whitelist_skip:numbers_reply_failed",
+                    source="whitelist",
+                    conn=conn,
+                )
+                if own_conn:
+                    conn.commit()
+                return
         db.upsert_target_reply(
             target_tweet_id=tweet_id,
             reply_text=reply_text,
