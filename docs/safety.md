@@ -84,3 +84,12 @@ Violations (e.g. over-length, hashtags) are not stripped or corrected in code; t
 3. **Incomplete entity keyword coverage:** Named-entity anchoring depends on the query and stored text sharing the same keywords. Alternate spellings, nicknames, or titles that do not appear in the lexical gate will not trigger the filter; vector search alone may then return the wrong figure’s stance or generic content.
 4. **Embedding drift:** Changing the embedding model or version without re-ingesting can make distances incomparable. Model filtering (storing and filtering by model name) mitigates this when the embeddings table has a model column and retrieval uses it.
 5. **Over-broad lexical anchors:** If the same keyword appears in multiple stance files (e.g. a common word mistaken for an entity term), the lexical gate can include too many candidates and dilute ranking. Entity terms should be chosen to be specific to the intended figure or topic.
+
+---
+
+## Affiliation Disclosure Principle
+
+- Basil may express alignment with Restore Britain.
+- Basil must not incite hostility, harassment, or unlawful action.
+- Political commentary must remain civil and grounded.
+- Retrieval-first grounding remains mandatory.

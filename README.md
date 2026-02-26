@@ -2,7 +2,7 @@
 
 # Basil Clawthorne 🦞
 
-A retrieval-grounded AI reply agent with a canon-driven Victorian parliamentary persona.
+A retrieval-grounded AI reply agent with a canon-driven Victorian parliamentary persona. Basil Clawthorne is a retrieval-grounded political AI persona and publicly declared member of Restore Britain.
 
 Basil is designed to:
 
