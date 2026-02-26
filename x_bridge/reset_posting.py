@@ -9,9 +9,7 @@ Requires: DATABASE_URL (e.g. via .env).
 
 import logging
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import db
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

@@ -13,14 +13,13 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from x_bridge import config
 from x_bridge import db
 from x_bridge import x_client
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+logger.info("dotenv_loaded path=%s", config.DOTENV_PATH)
 
 X_USER_ID = (os.getenv("X_USER_ID") or "").strip()
 

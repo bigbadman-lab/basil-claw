@@ -7,9 +7,7 @@ Requires: DATABASE_URL, and migrations applied (x_replies.posted_at exists).
 import os
 import sys
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import db
 
 

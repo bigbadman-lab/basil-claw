@@ -13,9 +13,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import db
 from x_bridge import x_client
 

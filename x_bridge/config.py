@@ -3,10 +3,13 @@ Env-based config for x_bridge. Same pattern as run_mentions_once: parse at impor
 """
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_ROOT = Path(__file__).resolve().parents[1]
+DOTENV_PATH = _ROOT / ".env"
+load_dotenv(dotenv_path=DOTENV_PATH, override=False)
 
 
 def _parse_positive_int(env_key: str, default: int) -> int:

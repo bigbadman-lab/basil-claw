@@ -17,12 +17,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
+from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import db
 from x_bridge import x_client
 

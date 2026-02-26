@@ -12,9 +12,7 @@ Requires: DATABASE_URL, X_* env vars.
 import logging
 import sys
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import db
 from x_bridge import x_client
 

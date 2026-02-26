@@ -15,9 +15,7 @@ import re
 import sys
 from typing import Optional
 
-from dotenv import load_dotenv
-load_dotenv()
-
+from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import x_client
 
 
