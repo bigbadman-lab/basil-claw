@@ -263,6 +263,16 @@ def run_once() -> None:
             err_str = str(e)
             response = getattr(e, "response", None)
             status_code = getattr(response, "status_code", None) if response else None
+            X_403_REPLY_NOT_ALLOWED = (
+                "Reply to this conversation is not allowed because you have not been "
+                "mentioned or otherwise engaged by the author of the post you are replying to."
+            )
+            if status_code == 403 and X_403_REPLY_NOT_ALLOWED in err_str:
+                # NON_FATAL: do not increment repeated_failures or disable posting; mark reply blocked.
+                db.set_reply_blocked(reply_id, "x_403_reply_not_allowed", err_str, conn=conn)
+                conn.commit()
+                logger.warning("standalone_post_blocked_403_reply_not_allowed reply_id=%s", reply_id)
+                return
             db.record_post_failure(err_str, conn=conn)
             db.record_standalone_posting_error(conn=conn)
             if status_code == 429:

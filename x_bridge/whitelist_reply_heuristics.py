@@ -22,6 +22,16 @@ def _reply_prob_default() -> float:
         return 0.35
 
 
+def _min_reply_score() -> float:
+    raw = os.getenv("MIN_REPLY_SCORE")
+    if raw is None or raw.strip() == "":
+        return 1.0
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return 1.0
+
+
 # Strong claim: modal/absolute + political noun
 _CLAIM_MARKERS = re.compile(
     r"\b(is|will|always|never|must|can't|cannot)\b",
@@ -32,8 +42,9 @@ _POLITICAL_NOUNS = re.compile(
     re.IGNORECASE,
 )
 
-# Numbers, percentages, currency
-_NUMBERS_PERCENT = re.compile(r"\d|%|£|\$|percent|per cent", re.IGNORECASE)
+# Tight numbers_safe trigger: digits, %, or currency (£ $ €) in content. Check text with URLs removed so links don't trigger.
+# Do NOT trigger on links, emojis, uppercase, or words like "million" without digits.
+_DIGIT_OR_PERCENT_OR_CURRENCY = re.compile(r"\d|%|£|\$|€")
 
 # Controversy triggers
 _CONTROVERSY = re.compile(
@@ -98,10 +109,10 @@ def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, 
         score += 1
         reasons.append("claim")
 
-    # numbers/percentages/currency: no score boost; tag for numbers-safe reply and small penalty to avoid over-targeting stat-heavy posts
-    if _NUMBERS_PERCENT.search(text):
-        score -= 0.5
-        reasons.append("numbers_present")
+    # digits/percent/currency (in content, not in URLs): neutral for score; tag for numbers-safe reply and reason
+    text_for_numbers = _LINK_PATTERN.sub(" ", text)
+    if _DIGIT_OR_PERCENT_OR_CURRENCY.search(text_for_numbers):
+        reasons.append("digits_present")
         constraints["needs_numbers_safe_reply"] = True
 
     # +1 controversy
@@ -119,22 +130,21 @@ def whitelist_should_reply(tweet_id: str, tweet_text: str) -> Tuple[str, float, 
         score -= 2
         reasons.append("celebration")
 
-    # Decision rules (no auto-skip for digits)
+    # Basic eligibility: not just a link, has some text (same as not short / not mostly_links)
+    eligible = len(text) >= 40 and not (link_len >= 0.5 * len(text) if text else True)
+    constraints["eligible"] = eligible
+
+    min_reply_score = _min_reply_score()
+    # Decision: reply if question OR (score >= MIN_REPLY_SCORE and eligible)
     if "?" in text:
         decision = "reply"
         reason = "question;" + ";".join(reasons)
-    elif score >= 2:
-        prob = _reply_prob_default()
-        rnd = _deterministic_random(tweet_id)
-        if rnd < prob:
-            decision = "reply"
-            reason = f"score={score:.1f},prob={prob},rnd={rnd:.3f};" + ";".join(reasons)
-        else:
-            decision = "skip"
-            reason = f"score={score:.1f},prob={prob},rnd={rnd:.3f};" + ";".join(reasons)
+    elif score >= min_reply_score and eligible:
+        decision = "reply"
+        reason = f"score={score:.1f},min={min_reply_score};" + ";".join(reasons)
     else:
         decision = "skip"
-        reason = f"score={score:.1f};" + ";".join(reasons)
+        reason = f"score={score:.1f},min={min_reply_score};" + ";".join(reasons)
 
     return (decision, score, reason, constraints)
 

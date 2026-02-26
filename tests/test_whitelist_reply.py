@@ -23,8 +23,27 @@ def test_tweet_with_2025_not_auto_skipped_for_digits():
     decision, score, reason, constraints = whitelist_should_reply(tweet_id, tweet_text)
     assert decision == "reply", "tweet with question and 2025 should get reply (question rule), not skip"
     assert constraints.get("needs_numbers_safe_reply") is True, "tweet contains digits so must have numbers_safe constraint"
-    assert "numbers_present" in reason
+    assert "digits_present" in reason
     print("OK: tweet with 2025 not auto-skipped for digits")
+
+
+def test_tweet_with_only_url_no_digits_does_not_set_needs_numbers_safe_reply():
+    """Tweet with no digits in content and only a URL should NOT set needs_numbers_safe_reply (URLs ignored)."""
+    tweet_id = "999"
+    tweet_text = "Check this out https://example.com/path/2024/news and share your thoughts?"
+    decision, score, reason, constraints = whitelist_should_reply(tweet_id, tweet_text)
+    assert constraints.get("needs_numbers_safe_reply") is not True, "URL may contain digits but content has no digits/percent/currency"
+    print("OK: tweet with only URL (no digits in content) does not set needs_numbers_safe_reply")
+
+
+def test_tweet_10_times_harder_sets_needs_numbers_safe_reply():
+    """Tweet with '10 times harder' (digit in content) should set needs_numbers_safe_reply."""
+    tweet_id = "888"
+    tweet_text = "This is 10 times harder than we thought. What do you think?"
+    decision, score, reason, constraints = whitelist_should_reply(tweet_id, tweet_text)
+    assert constraints.get("needs_numbers_safe_reply") is True
+    assert "digits_present" in reason
+    print("OK: tweet with '10 times harder' sets needs_numbers_safe_reply")
 
 
 def test_numbers_safe_prompt_instructions():
@@ -76,6 +95,8 @@ def test_numbers_safe_reply_contains_no_digits():
 if __name__ == "__main__":
     try:
         test_tweet_with_2025_not_auto_skipped_for_digits()
+        test_tweet_with_only_url_no_digits_does_not_set_needs_numbers_safe_reply()
+        test_tweet_10_times_harder_sets_needs_numbers_safe_reply()
         test_numbers_safe_prompt_instructions()
         test_run_ingest_and_draft_returns_three_counts()
         test_numbers_safe_reply_contains_no_digits()

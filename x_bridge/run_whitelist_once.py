@@ -155,6 +155,7 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
 
     targets_processed = 0
     numbers_safe_drafts_created = 0
+    skipped_eligible: list = []  # (tweet_id, tweet_text, score, reason, constraints) for wildcard
     if whitelist_reply_enabled:
         from ingest.reply_engine import generate_reply_whitelist_text
 
@@ -163,20 +164,14 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
         def _reply_contains_digit(text: str) -> bool:
             return bool(text and re.search(r"\d", text))
 
-        unreplied = db.list_unreplied_targets(limit=50, conn=conn)
-        for row in unreplied:
-            tweet_id, _source, _author_user_id, _author_handle, tweet_text, _tweet_created_at, _inserted_at, _raw_json = row
-            targets_processed += 1
-            decision, _score, _reason, constraints = whitelist_should_reply_and_persist(tweet_id, tweet_text, conn=conn)
-            if decision == "skip":
-                targets_skipped += 1
-                continue
+        def _do_draft(tweet_id: str, tweet_text: str, constraints: dict) -> bool:
+            """Generate and insert one draft. Returns True if draft created."""
             needs_numbers_safe = constraints.get("needs_numbers_safe_reply", False)
             try:
                 reply_text = generate_reply_whitelist_text(tweet_text, conn, needs_numbers_safe_reply=needs_numbers_safe)
             except Exception as e:
                 logger.warning("whitelist_draft_error tweet_id=%s error=%s", tweet_id, e)
-                continue
+                return False
             if needs_numbers_safe and _reply_contains_digit(reply_text):
                 try:
                     reply_text = generate_reply_whitelist_text(tweet_text, conn, needs_numbers_safe_reply=True)
@@ -191,8 +186,7 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
                         source="whitelist",
                         conn=conn,
                     )
-                    targets_skipped += 1
-                    continue
+                    return False
             decision_str = "dry_run" if x_dry_run else "drafted"
             db.insert_whitelist_reply(
                 target_tweet_id=tweet_id,
@@ -200,9 +194,34 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
                 decision=decision_str,
                 conn=conn,
             )
-            drafts_created += 1
-            if needs_numbers_safe:
-                numbers_safe_drafts_created += 1
+            return True
+
+        unreplied = db.list_unreplied_targets(limit=50, conn=conn)
+        for row in unreplied:
+            tweet_id, _source, _author_user_id, _author_handle, tweet_text, _tweet_created_at, _inserted_at, _raw_json = row
+            targets_processed += 1
+            decision, score, reason, constraints = whitelist_should_reply_and_persist(tweet_id, tweet_text, conn=conn)
+            if decision == "skip":
+                targets_skipped += 1
+                if constraints.get("eligible"):
+                    skipped_eligible.append((tweet_id, tweet_text, score, reason, constraints))
+                continue
+            if _do_draft(tweet_id, tweet_text, constraints):
+                drafts_created += 1
+                if constraints.get("needs_numbers_safe_reply"):
+                    numbers_safe_drafts_created += 1
+
+        # One wildcard per run: if no candidates met MIN_REPLY_SCORE, pick best-scoring eligible and reply anyway
+        if drafts_created == 0 and skipped_eligible:
+            best = max(skipped_eligible, key=lambda x: x[2])
+            tweet_id, tweet_text, score, reason, constraints = best
+            db.update_target_reply_decision(tweet_id, "reply", score, reason + ";wildcard", conn=conn)
+            logger.info("whitelist_wildcard_used tweet_id=%s score=%s", tweet_id, score)
+            if _do_draft(tweet_id, tweet_text, constraints):
+                drafts_created += 1
+                if constraints.get("needs_numbers_safe_reply"):
+                    numbers_safe_drafts_created += 1
+
         logger.info(
             "whitelist_unreplied targets_processed=%s drafts_created=%s targets_skipped=%s numbers_safe_drafts=%s",
             targets_processed,
