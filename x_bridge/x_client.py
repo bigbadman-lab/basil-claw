@@ -26,6 +26,43 @@ def _user_id() -> str:
     return uid.strip()
 
 
+def get_tweet(
+    tweet_id: str,
+    tweet_fields: Optional[list[str]] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    Fetch a single tweet by ID.
+    Returns dict with tweet_id, author_id, created_at, conversation_id, text, or None if not found/error.
+    """
+    if not tweet_id or not tweet_id.strip():
+        return None
+    client = get_v2_client()
+    fields = tweet_fields or ["author_id", "created_at", "conversation_id", "text"]
+    try:
+        resp = client.get_tweet(
+            id=tweet_id.strip(),
+            tweet_fields=fields,
+            user_auth=True,
+        )
+    except Exception:
+        return None
+    data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
+    if not data:
+        return None
+    tid = getattr(data, "id", None) or (data.get("id") if isinstance(data, dict) else None)
+    author_id = getattr(data, "author_id", None) or (data.get("author_id") if isinstance(data, dict) else None)
+    text = getattr(data, "text", None) or (data.get("text") if isinstance(data, dict) else "") or ""
+    created_at = getattr(data, "created_at", None) or (data.get("created_at") if isinstance(data, dict) else None)
+    conversation_id = getattr(data, "conversation_id", None) or (data.get("conversation_id") if isinstance(data, dict) else None)
+    return {
+        "tweet_id": str(tid) if tid else tweet_id,
+        "author_id": str(author_id) if author_id else "",
+        "created_at": created_at,
+        "conversation_id": str(conversation_id) if conversation_id else "",
+        "text": text,
+    }
+
+
 def get_mentions(
     since_id: Optional[str] = None,
     max_results: int = 50,
@@ -87,7 +124,7 @@ def _tweet_to_dict(t: Any) -> Optional[dict]:
     if isinstance(t, dict):
         return {k: _json_safe(v) for k, v in t.items()}
     d = {}
-    for attr in ("id", "text", "author_id", "created_at", "conversation_id", "in_reply_to_user_id"):
+    for attr in ("id", "text", "author_id", "created_at", "conversation_id", "in_reply_to_user_id", "referenced_tweets"):
         if hasattr(t, attr):
             v = getattr(t, attr)
             if v is not None:
@@ -96,6 +133,69 @@ def _tweet_to_dict(t: Any) -> Optional[dict]:
         for k, v in t.data.items():
             d[k] = _json_safe(v)
     return d if d else None
+
+
+def get_user_tweets(
+    user_id: str,
+    since_id: Optional[str] = None,
+    max_results: int = 100,
+    exclude: Optional[list[str]] = None,
+) -> list[dict[str, Any]]:
+    """
+    Fetch tweets from a user's timeline (Tweepy v2 get_users_tweets).
+    Returns list of dicts with: tweet_id, author_id, author_username, text, created_at, referenced_tweets, raw_json.
+    """
+    if exclude is None:
+        exclude = ["replies", "retweets"]
+    client = get_v2_client()
+    kwargs = {
+        "id": user_id.strip(),
+        "max_results": min(100, max(5, max_results)),
+        "tweet_fields": ["created_at", "author_id", "referenced_tweets"],
+        "expansions": ["author_id"],
+        "user_fields": ["username"],
+        "user_auth": True,
+    }
+    if since_id:
+        kwargs["since_id"] = since_id.strip()
+    if exclude:
+        kwargs["exclude"] = exclude
+    resp = client.get_users_tweets(**kwargs)
+    data = getattr(resp, "data", None) or (resp.get("data") if isinstance(resp, dict) else None)
+    if not data:
+        return []
+
+    includes = getattr(resp, "includes", None) or (resp.get("includes") if isinstance(resp, dict) else {})
+    users_list = includes.get("users", []) if isinstance(includes, dict) else getattr(includes, "users", []) or []
+    users_by_id = {}
+    for u in users_list:
+        uid_key = getattr(u, "id", None) or (u.get("id") if isinstance(u, dict) else None)
+        if uid_key:
+            users_by_id[str(uid_key)] = u
+
+    out = []
+    for t in data:
+        tid = getattr(t, "id", None) or (t.get("id") if isinstance(t, dict) else None)
+        author_id = getattr(t, "author_id", None) or (t.get("author_id") if isinstance(t, dict) else None)
+        text = getattr(t, "text", None) or (t.get("text") if isinstance(t, dict) else "") or ""
+        created_at = getattr(t, "created_at", None) or (t.get("created_at") if isinstance(t, dict) else None)
+        refs = getattr(t, "referenced_tweets", None) or (t.get("referenced_tweets") if isinstance(t, dict) else None) or []
+        author_username = None
+        if author_id:
+            u = users_by_id.get(str(author_id))
+            if u:
+                author_username = getattr(u, "username", None) or (u.get("username") if isinstance(u, dict) else None)
+        raw_json = _tweet_to_dict(t) if t else None
+        out.append({
+            "tweet_id": str(tid) if tid else "",
+            "author_id": str(author_id) if author_id else "",
+            "author_username": author_username or "",
+            "text": text,
+            "created_at": created_at,
+            "referenced_tweets": refs,
+            "raw_json": raw_json,
+        })
+    return out
 
 
 def _json_safe(v: Any) -> Any:

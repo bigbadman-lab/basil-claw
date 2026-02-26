@@ -9,6 +9,7 @@ No X API.
 import os
 import time
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form, Request
@@ -41,7 +42,7 @@ app.add_middleware(
 )
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 
-LAST_OUTPUT: str | None = None
+LAST_OUTPUT: Optional[str] = None
 LAST_REQUEST_TS: float = 0.0
 COOLDOWN_SECONDS: float = 5.0
 

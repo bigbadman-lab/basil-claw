@@ -39,8 +39,29 @@ def _parse_positive_int(env_key: str, default: int) -> int:
         return default
 
 
+def _parse_float(env_key: str, default: float) -> float:
+    raw = os.getenv(env_key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
+
+
+def _parse_bool_default_false(env_key: str) -> bool:
+    raw = (os.getenv(env_key) or "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
 max_posts_per_run = _parse_positive_int("MAX_POSTS_PER_RUN", 50)
 hourly_post_cap = _parse_positive_int("HOURLY_POST_CAP", 300)
+
+whitelist_reply_enabled = _parse_bool_default_false("WHITELIST_REPLY_ENABLED")
+whitelist_engagement_mode = _parse_positive_int("WHITELIST_ENGAGEMENT_MODE", 1)
+whitelist_max_replies_per_run = _parse_positive_int("WHITELIST_MAX_REPLIES_PER_RUN", 3)
+whitelist_reply_prob_default = _parse_float("WHITELIST_REPLY_PROB_DEFAULT", 0.35)
+whitelist_reply_max_age_minutes = _parse_positive_int("WHITELIST_REPLY_MAX_AGE_MINUTES", 30)
 
 X_REPLY_MAX_LEN = 280
 X_REPLY_ELLIPSIS = "..."
@@ -94,8 +115,11 @@ def run_once() -> None:
         remaining_hour_budget = max(0, hourly_post_cap - posted_last_hour)
         allowed_this_run = min(max_posts_per_run, remaining_hour_budget)
         _posting_enabled_env = (os.getenv("X_POSTING_ENABLED") or "").strip().lower() in ("1", "true", "yes")
+        whitelist_targets_inserted = 0
+        whitelist_drafts_created = 0
+        whitelist_skipped = 0
         logger.info(
-            "run_start X_DRY_RUN=%s X_POSTING_ENABLED=%s max_posts_per_run=%s hourly_post_cap=%s posted_last_hour=%s remaining_hour_budget=%s allowed_this_run=%s",
+            "run_start X_DRY_RUN=%s X_POSTING_ENABLED=%s max_posts_per_run=%s hourly_post_cap=%s posted_last_hour=%s remaining_hour_budget=%s allowed_this_run=%s whitelist_targets_inserted=%s whitelist_drafts_created=%s whitelist_skipped=%s",
             X_DRY_RUN,
             _posting_enabled_env,
             max_posts_per_run,
@@ -103,6 +127,17 @@ def run_once() -> None:
             posted_last_hour,
             remaining_hour_budget,
             allowed_this_run,
+            whitelist_targets_inserted,
+            whitelist_drafts_created,
+            whitelist_skipped,
+        )
+        logger.info(
+            "whitelist_config whitelist_reply_enabled=%s whitelist_engagement_mode=%s whitelist_max_replies_per_run=%s whitelist_reply_prob_default=%s whitelist_reply_max_age_minutes=%s",
+            whitelist_reply_enabled,
+            whitelist_engagement_mode,
+            whitelist_max_replies_per_run,
+            whitelist_reply_prob_default,
+            whitelist_reply_max_age_minutes,
         )
         if X_DRY_RUN:
             logger.info("DRY RUN enabled: will not post to X")
@@ -131,11 +166,14 @@ def run_once() -> None:
                     _posting_disabled_until,
                 )
             logger.info(
-                "run_end mentions_fetched=0 drafts_created=0 claimed=0 posted_this_run=0 allowed_this_run=%s posted_last_hour=%s hourly_post_cap=%s posting_enabled=%s%s",
+                "run_end mentions_fetched=0 drafts_created=0 claimed=0 posted_this_run=0 allowed_this_run=%s posted_last_hour=%s hourly_post_cap=%s posting_enabled=%s whitelist_targets_inserted=%s whitelist_drafts_created=%s whitelist_skipped=%s%s",
                 allowed_this_run,
                 _posted_last_hour,
                 hourly_post_cap,
                 _posting_enabled,
+                whitelist_targets_inserted,
+                whitelist_drafts_created,
+                whitelist_skipped,
                 _extra,
             )
             conn.commit()
@@ -264,6 +302,14 @@ def run_once() -> None:
                 except Exception as e:
                     logger.warning("set_cursor failed: %s", e)
 
+        if whitelist_reply_enabled:
+            try:
+                from x_bridge import run_whitelist_once as whitelist
+
+                whitelist_targets_inserted, whitelist_drafts_created, whitelist_skipped = whitelist.run_ingest_and_draft(conn)
+            except Exception as e:
+                logger.warning("whitelist_ingest_draft_failed error=%s", e)
+
         posted_this_run = 0
         claimed_count = 0
         can_post = True
@@ -285,59 +331,103 @@ def run_once() -> None:
             else:
                 can_post = False
 
+        X_403_REPLY_NOT_ALLOWED = (
+            "Reply to this conversation is not allowed because you have not been "
+            "mentioned or otherwise engaged by the author of the post you are replying to."
+        )
+        claimed_count = 0
         if not X_DRY_RUN and can_post:
             if allowed_this_run == 0:
                 logger.info("hourly_cap_reached: skipping claim+post phase")
             else:
-                claimed = db.claim_replies_for_posting(
+                # Pass 1: claim mention replies up to full budget
+                claimed_mentions = db.claim_replies_for_posting(
                     limit=allowed_this_run,
                     claimed_by="run_mentions_once",
                     conn=conn,
                 )
-                claimed_count = len(claimed)
-                for reply_id, mention_tweet_id, reply_text in claimed:
-                    if posted_this_run >= allowed_this_run:
-                        break
+                # Pass 2: claim whitelist drafts up to remaining budget and whitelist cap
+                remaining_after_mentions = allowed_this_run - len(claimed_mentions)
+                whitelist_cap = (
+                    min(remaining_after_mentions, whitelist_max_replies_per_run)
+                    if whitelist_reply_enabled
+                    else 0
+                )
+                claimed_whitelist = (
+                    db.claim_whitelist_replies_for_posting(
+                        limit=whitelist_cap,
+                        claimed_by="run_mentions_once",
+                        conn=conn,
+                    )
+                    if whitelist_cap > 0
+                    else []
+                )
+                claimed_count = len(claimed_mentions) + len(claimed_whitelist)
+
+                def post_one(in_reply_to_tweet_id: str, reply_text: str, kind: str, id_for_log) -> bool:
+                    """Post one reply; update DB on success; handle errors. Returns True if posted."""
+                    nonlocal posted_this_run
                     try:
-                        reply_tweet_id = x_client.post_reply(reply_text, mention_tweet_id)
-                        db.update_reply_posted(reply_id, reply_tweet_id, conn=conn)
-                        db.mark_replied(mention_tweet_id, conn=conn)
+                        reply_tweet_id = x_client.post_reply(reply_text, in_reply_to_tweet_id)
+                        if kind == "mention":
+                            db.update_reply_posted(id_for_log, reply_tweet_id, conn=conn)
+                            db.mark_replied(in_reply_to_tweet_id, conn=conn)
+                        else:
+                            db.update_target_reply_posted(in_reply_to_tweet_id, reply_tweet_id, conn=conn)
                         db.record_post_success(conn=conn)
-                        posted_at = db.get_reply_posted_at(mention_tweet_id, conn=conn)
-                        assert posted_at is not None, "posted_at must be set when reply_tweet_id is set"
                         posted_this_run += 1
+                        return True
                     except Exception as e:
                         err_str = str(e)
                         response = getattr(e, "response", None)
                         status_code = getattr(response, "status_code", None) if response else None
-                        X_403_REPLY_NOT_ALLOWED = (
-                            "Reply to this conversation is not allowed because you have not been "
-                            "mentioned or otherwise engaged by the author of the post you are replying to."
-                        )
                         if status_code == 429:
-                            db.set_reply_error(reply_id, err_str, conn=conn)
+                            if kind == "mention":
+                                db.set_reply_error(id_for_log, err_str, conn=conn)
+                            else:
+                                db.set_target_reply_error(in_reply_to_tweet_id, err_str, conn=conn)
                             db.disable_posting("rate_limited_429", timedelta(minutes=60), conn=conn)
                             logger.info("posting_disabled_429")
                         elif status_code == 403 and X_403_REPLY_NOT_ALLOWED in err_str:
-                            db.set_reply_blocked(
-                                reply_id, "x_reply_not_allowed", err_str, conn=conn
-                            )
+                            if kind == "mention":
+                                db.set_reply_blocked(id_for_log, "x_reply_not_allowed", err_str, conn=conn)
+                            else:
+                                db.set_target_reply_blocked(
+                                    in_reply_to_tweet_id, "x_reply_not_allowed", err_str, conn=conn
+                                )
                             logger.warning(
-                                "post_reply blocked (reply not allowed) for mention %s: %s",
-                                mention_tweet_id,
+                                "post_reply blocked (reply not allowed) for %s %s: %s",
+                                kind,
+                                in_reply_to_tweet_id,
                                 e,
                             )
                         elif status_code == 403:
-                            db.set_reply_error(reply_id, err_str, conn=conn)
+                            if kind == "mention":
+                                db.set_reply_error(id_for_log, err_str, conn=conn)
+                            else:
+                                db.set_target_reply_error(in_reply_to_tweet_id, err_str, conn=conn)
                             db.disable_posting("forbidden_403", None, conn=conn)
                             logger.info("posting_disabled_403")
                         else:
-                            db.set_reply_error(reply_id, err_str, conn=conn)
+                            if kind == "mention":
+                                db.set_reply_error(id_for_log, err_str, conn=conn)
+                            else:
+                                db.set_target_reply_error(in_reply_to_tweet_id, err_str, conn=conn)
                             db.record_post_failure(err_str, conn=conn)
                             if db.get_consecutive_post_failures(conn=conn) >= 3:
                                 db.disable_posting("repeated_failures", timedelta(minutes=30), conn=conn)
                         if status_code != 403 or X_403_REPLY_NOT_ALLOWED not in err_str:
-                            logger.warning("post_reply failed for mention %s: %s", mention_tweet_id, e)
+                            logger.warning("post_reply failed for %s %s: %s", kind, in_reply_to_tweet_id, e)
+                        return False
+
+                for reply_id, mention_tweet_id, reply_text in claimed_mentions:
+                    if posted_this_run >= allowed_this_run:
+                        break
+                    post_one(mention_tweet_id, reply_text, "mention", reply_id)
+                for target_tweet_id, reply_text in claimed_whitelist:
+                    if posted_this_run >= allowed_this_run:
+                        break
+                    post_one(target_tweet_id, reply_text, "whitelist", target_tweet_id)
 
         posted_last_hour_end = db.count_posts_last_hour(conn=conn)
         posting_enabled_end, posting_disabled_until_end, posting_disabled_reason_end = db.get_posting_state(conn=conn)
@@ -348,7 +438,7 @@ def run_once() -> None:
                 posting_disabled_until_end,
             )
         logger.info(
-            "run_end mentions_fetched=%s drafts_created=%s claimed=%s posted_this_run=%s allowed_this_run=%s posted_last_hour=%s hourly_post_cap=%s posting_enabled=%s%s",
+            "run_end mentions_fetched=%s drafts_created=%s claimed=%s posted_this_run=%s allowed_this_run=%s posted_last_hour=%s hourly_post_cap=%s posting_enabled=%s whitelist_targets_inserted=%s whitelist_drafts_created=%s whitelist_skipped=%s%s",
             mentions_fetched,
             drafts_created,
             claimed_count,
@@ -357,6 +447,9 @@ def run_once() -> None:
             posted_last_hour_end,
             hourly_post_cap,
             posting_enabled_end,
+            whitelist_targets_inserted,
+            whitelist_drafts_created,
+            whitelist_skipped,
             extra_disabled,
         )
         conn.commit()

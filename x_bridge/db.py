@@ -213,15 +213,19 @@ def get_reply_posted_at(mention_tweet_id: str, conn=None) -> Any:
 
 
 def count_posts_last_hour(conn=None) -> int:
-    """Return count of x_replies rows with reply_tweet_id set and posted_at in the last hour."""
+    """Return count of posts in the last hour: x_replies (mention replies) + x_target_replies (whitelist)."""
     own_conn = conn is None
     c = conn or _connect()
     try:
         with c.cursor() as cur:
             cur.execute(
                 """
-                SELECT COUNT(*) FROM x_replies
-                WHERE reply_tweet_id IS NOT NULL AND posted_at >= now() - interval '1 hour'
+                SELECT
+                    (SELECT COUNT(*) FROM x_replies
+                     WHERE reply_tweet_id IS NOT NULL AND posted_at >= now() - interval '1 hour')
+                    +
+                    (SELECT COUNT(*) FROM x_target_replies
+                     WHERE posted_at IS NOT NULL AND posted_at >= now() - interval '1 hour')
                 """
             )
             row = cur.fetchone()
@@ -232,7 +236,7 @@ def count_posts_last_hour(conn=None) -> int:
 
 
 def claim_replies_for_posting(limit: int, claimed_by: str, conn=None) -> list[tuple[int, str, str]]:
-    """Claim up to `limit` unposted reply rows (reply_tweet_id IS NULL and no error_text). Returns list of (id, mention_tweet_id, reply_text)."""
+    """Claim up to `limit` unposted reply rows (mention or whitelist). Returns list of (id, in_reply_to_tweet_id, reply_text)."""
     if limit <= 0:
         return []
     own_conn = conn is None
@@ -242,10 +246,11 @@ def claim_replies_for_posting(limit: int, claimed_by: str, conn=None) -> list[tu
             cur.execute(
                 """
                 WITH sel AS (
-                    SELECT id, mention_tweet_id, reply_text
+                    SELECT id, COALESCE(mention_tweet_id, target_tweet_id) AS in_reply_to, reply_text
                     FROM x_replies
                     WHERE reply_tweet_id IS NULL
                       AND (error_text IS NULL OR error_text = '')
+                      AND (mention_tweet_id IS NOT NULL OR target_tweet_id IS NOT NULL)
                     ORDER BY created_at ASC
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -254,7 +259,7 @@ def claim_replies_for_posting(limit: int, claimed_by: str, conn=None) -> list[tu
                 SET post_claimed_at = now(), post_claimed_by = %s
                 FROM sel
                 WHERE r.id = sel.id
-                RETURNING r.id, r.mention_tweet_id, r.reply_text
+                RETURNING r.id, COALESCE(r.mention_tweet_id, r.target_tweet_id), r.reply_text
                 """,
                 (limit, claimed_by),
             )
@@ -474,6 +479,426 @@ def set_reply_error(reply_id: int, error_text: str, conn=None) -> None:
             cur.execute(
                 "UPDATE x_replies SET error_text = %s WHERE id = %s",
                 (error_text, reply_id),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+# ---------- Whitelist and targets ----------
+
+
+def list_enabled_whitelist_accounts(conn=None) -> list[tuple[str, str]]:
+    """Return list of (handle, user_id) for x_whitelist_accounts where enabled = true and user_id IS NOT NULL (synced accounts only)."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT handle, user_id FROM x_whitelist_accounts WHERE enabled = true AND user_id IS NOT NULL ORDER BY handle"
+            )
+            return [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+    finally:
+        if own_conn:
+            c.close()
+
+
+def list_whitelist_accounts_missing_user_id(conn=None) -> list[str]:
+    """Return list of handle for x_whitelist_accounts where enabled = true and user_id IS NULL."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT handle FROM x_whitelist_accounts WHERE enabled = true AND user_id IS NULL ORDER BY handle"
+            )
+            return [str(r[0]) for r in cur.fetchall()]
+    finally:
+        if own_conn:
+            c.close()
+
+
+def update_whitelist_account_user_id(handle: str, user_id: str, conn=None) -> None:
+    """Set user_id for the x_whitelist_accounts row with the given handle."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE x_whitelist_accounts SET user_id = %s WHERE handle = %s",
+                (user_id, handle),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def get_whitelist_cursor(user_id: str, conn=None) -> Optional[str]:
+    """Get since_id for user from x_whitelist_cursor. Returns None if no row or since_id is null."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute("SELECT since_id FROM x_whitelist_cursor WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            return str(row[0]) if row and row[0] is not None else None
+    finally:
+        if own_conn:
+            c.close()
+
+
+def set_whitelist_cursor(user_id: str, since_id: Optional[str], conn=None) -> None:
+    """Insert or update x_whitelist_cursor for user_id. since_id can be None."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO x_whitelist_cursor (user_id, since_id, updated_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    since_id = EXCLUDED.since_id,
+                    updated_at = now()
+                """,
+                (user_id, since_id),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def upsert_target(
+    tweet_id: str,
+    source: str,
+    author_user_id: str,
+    author_handle: Optional[str],
+    tweet_text: str,
+    tweet_created_at: Any,
+    raw_json: Any = None,
+    conn=None,
+) -> None:
+    """Insert or update x_targets by tweet_id. Uses ON CONFLICT DO UPDATE."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        created_ts = None
+        if tweet_created_at is not None:
+            try:
+                created_ts = str(tweet_created_at)
+            except Exception:
+                created_ts = None
+        raw_js = None
+        if raw_json is not None:
+            raw_js = json.dumps(raw_json) if not isinstance(raw_json, str) else raw_json
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO x_targets (tweet_id, source, author_user_id, author_handle, tweet_text, tweet_created_at, raw_json)
+                VALUES (%s, %s, %s, %s, %s, %s::timestamptz, %s::jsonb)
+                ON CONFLICT (tweet_id) DO UPDATE SET
+                    source = EXCLUDED.source,
+                    author_user_id = EXCLUDED.author_user_id,
+                    author_handle = EXCLUDED.author_handle,
+                    tweet_text = EXCLUDED.tweet_text,
+                    tweet_created_at = EXCLUDED.tweet_created_at,
+                    raw_json = COALESCE(EXCLUDED.raw_json, x_targets.raw_json)
+                """,
+                (tweet_id, source, author_user_id, author_handle or None, tweet_text, created_ts, raw_js),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def list_unreplied_targets(
+    limit: int = 50,
+    conn=None,
+) -> list[tuple[str, str, str, Optional[str], str, Any, Any, Optional[Any]]]:
+    """
+    Return x_targets rows that have no x_replies row with target_tweet_id = tweet_id.
+    Each row: (tweet_id, source, author_user_id, author_handle, tweet_text, tweet_created_at, inserted_at, raw_json).
+    Order by tweet_created_at asc so oldest first.
+    """
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            sql = """
+                SELECT t.tweet_id, t.source, t.author_user_id, t.author_handle, t.tweet_text,
+                       t.tweet_created_at, t.inserted_at, t.raw_json
+                FROM x_targets t
+                LEFT JOIN x_replies r ON r.target_tweet_id = t.tweet_id
+                WHERE r.target_tweet_id IS NULL
+                ORDER BY t.tweet_created_at ASC
+                LIMIT %s
+                """
+            cur.execute(sql, (max(1, limit),))
+            return [
+                (
+                    str(r[0]),
+                    str(r[1]),
+                    str(r[2]),
+                    str(r[3]) if r[3] is not None else None,
+                    str(r[4]),
+                    r[5],
+                    r[6],
+                    r[7],
+                )
+                for r in cur.fetchall()
+            ]
+    finally:
+        if own_conn:
+            c.close()
+
+
+def insert_whitelist_reply(
+    target_tweet_id: str,
+    reply_text: str,
+    decision: str,
+    conn=None,
+) -> None:
+    """Insert or update x_replies for a whitelist target. mention_tweet_id is NULL (no x_mentions row). Idempotent via ON CONFLICT (target_tweet_id)."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO x_replies (target_tweet_id, mention_tweet_id, reply_tweet_id, reply_text, decision, source)
+                VALUES (%s, NULL, NULL, %s, %s, 'whitelist')
+                ON CONFLICT (target_tweet_id) DO UPDATE SET
+                    reply_text = EXCLUDED.reply_text,
+                    decision = EXCLUDED.decision,
+                    source = EXCLUDED.source
+                """,
+                (target_tweet_id, reply_text, decision),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def select_unreplied_targets(
+    limit: Optional[int] = None,
+    conn=None,
+) -> list[tuple[str, str, str, Optional[str], str, Any, Any, Optional[Any]]]:
+    """
+    Return x_targets rows that have no corresponding x_replies row (mention_tweet_id = tweet_id).
+    Each row: (tweet_id, source, author_user_id, author_handle, tweet_text, tweet_created_at, inserted_at, raw_json).
+    Optional limit; order by tweet_created_at asc so oldest first.
+    """
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            sql = """
+                SELECT t.tweet_id, t.source, t.author_user_id, t.author_handle, t.tweet_text,
+                       t.tweet_created_at, t.inserted_at, t.raw_json
+                FROM x_targets t
+                LEFT JOIN x_replies r ON r.mention_tweet_id = t.tweet_id
+                WHERE r.mention_tweet_id IS NULL
+                ORDER BY t.tweet_created_at ASC
+                """
+            if limit is not None and limit > 0:
+                sql += " LIMIT %s"
+                cur.execute(sql, (limit,))
+            else:
+                cur.execute(sql)
+            return [
+                (
+                    str(r[0]),
+                    str(r[1]),
+                    str(r[2]),
+                    str(r[3]) if r[3] is not None else None,
+                    str(r[4]),
+                    r[5],
+                    r[6],
+                    r[7],
+                )
+                for r in cur.fetchall()
+            ]
+    finally:
+        if own_conn:
+            c.close()
+
+
+def update_target_reply_decision(
+    tweet_id: str,
+    decision: str,
+    score: float,
+    reason: str,
+    conn=None,
+) -> None:
+    """Set reply_decision, reply_score, reply_reason on x_targets for audit."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_targets
+                SET reply_decision = %s, reply_score = %s, reply_reason = %s
+                WHERE tweet_id = %s
+                """,
+                (decision, score, reason, tweet_id),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def upsert_target_reply(
+    target_tweet_id: str,
+    reply_text: Optional[str],
+    decision: str,
+    block_reason: Optional[str] = None,
+    source: str = "whitelist",
+    conn=None,
+) -> None:
+    """Insert or update x_target_replies by target_tweet_id. Use decision='blocked' for skip, reply_text null; decision='drafted' for draft with reply_text."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO x_target_replies (target_tweet_id, reply_text, decision, block_reason, source)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (target_tweet_id) DO UPDATE SET
+                    reply_text = EXCLUDED.reply_text,
+                    decision = EXCLUDED.decision,
+                    block_reason = EXCLUDED.block_reason,
+                    source = EXCLUDED.source
+                """,
+                (target_tweet_id, reply_text, decision, block_reason, source),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def claim_whitelist_replies_for_posting(
+    limit: int,
+    claimed_by: str,
+    conn=None,
+) -> list[tuple[str, str]]:
+    """Claim up to `limit` whitelist drafts (decision='drafted', post_claimed_at IS NULL). Returns list of (target_tweet_id, reply_text)."""
+    if limit <= 0:
+        return []
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                WITH sel AS (
+                    SELECT target_tweet_id, reply_text
+                    FROM x_target_replies
+                    WHERE decision = 'drafted'
+                      AND post_claimed_at IS NULL
+                      AND (error_text IS NULL OR error_text = '')
+                      AND reply_text IS NOT NULL
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE x_target_replies r
+                SET post_claimed_at = now(), post_claimed_by = %s
+                FROM sel
+                WHERE r.target_tweet_id = sel.target_tweet_id
+                RETURNING r.target_tweet_id, r.reply_text
+                """,
+                (limit, claimed_by),
+            )
+            rows = [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+        if own_conn:
+            c.commit()
+        return rows
+    finally:
+        if own_conn:
+            c.close()
+
+
+def update_target_reply_posted(
+    target_tweet_id: str,
+    reply_tweet_id: str,
+    conn=None,
+) -> None:
+    """Set reply_tweet_id and posted_at=now() for a claimed whitelist reply row."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_target_replies
+                SET reply_tweet_id = %s, posted_at = now()
+                WHERE target_tweet_id = %s
+                """,
+                (reply_tweet_id, target_tweet_id),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def set_target_reply_blocked(
+    target_tweet_id: str,
+    block_reason: str,
+    error_text: str,
+    conn=None,
+) -> None:
+    """Set x_target_replies to decision='blocked', block_reason, error_text; clear claim so it is not retried."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_target_replies
+                SET decision = 'blocked', block_reason = %s, error_text = %s,
+                    post_claimed_at = NULL, post_claimed_by = NULL
+                WHERE target_tweet_id = %s
+                """,
+                (block_reason, error_text, target_tweet_id),
+            )
+        if own_conn:
+            c.commit()
+    finally:
+        if own_conn:
+            c.close()
+
+
+def set_target_reply_error(target_tweet_id: str, error_text: str, conn=None) -> None:
+    """Set error_text on x_target_replies and clear claim so it is not retried until manually cleared."""
+    own_conn = conn is None
+    c = conn or _connect()
+    try:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE x_target_replies
+                SET error_text = %s, post_claimed_at = NULL, post_claimed_by = NULL
+                WHERE target_tweet_id = %s
+                """,
+                (error_text, target_tweet_id),
             )
         if own_conn:
             c.commit()

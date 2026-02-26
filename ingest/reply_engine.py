@@ -271,6 +271,63 @@ Context:
     return resp.output_text.strip()
 
 
+def _generate_reply_whitelist(user_text: str, retrieved: List[Tuple[int, str, str]], canon: str) -> str:
+    """Whitelist style: max 2 sentences, 280 chars, witty/sharp/confident, no hashtags, at most one emoji (use sparingly), no ungrounded factual assertions."""
+    context_block = ""
+    if retrieved:
+        lines = [f"[{cid}] {st}\n{ct}" for (cid, st, ct) in retrieved]
+        context_block = "\n\n".join(lines)
+    system = """
+You are Basil Clawthorne. Follow the canon below strictly.
+
+CANON:
+{canon}
+
+STYLE (whitelist engagement):
+- Maximum 2 sentences. Maximum 280 characters total.
+- Witty, sharp, confident. Dry wit. Slightly mischievous.
+- No hashtags. No bullet points. No links.
+- At most one emoji; use only when it really fits (roughly 10% of the time).
+- Do not start with "One must acknowledge" or similar formal openers.
+
+RULES:
+- Do not invent or assert factual claims unless they are clearly grounded in the retrieved context below.
+- If you cannot ground a fact from retrieval, phrase your point as opinion or a question instead.
+""".strip().format(canon=canon)
+    user = """
+Tweet: {user_text}
+
+Context (use only to ground facts; otherwise be concise and sharp):
+{context_block}
+""".strip().format(
+        user_text=user_text,
+        context_block=context_block if context_block else "[no retrieved context]",
+    )
+    resp = client.responses.create(
+        model=CHAT_MODEL,
+        input=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    out = (resp.output_text or "").strip()
+    if len(out) > 280:
+        out = out[:277].rsplit(" ", 1)[0] + "..." if " " in out[:277] else out[:277] + "..."
+    return out
+
+
+def generate_reply_whitelist_text(user_text: str, conn) -> str:
+    """
+    Generate a single Basil reply for whitelist engagement: same retrieval + canon as mentions,
+    but with whitelist instruction set (max 2 sentences, 280 chars, witty/sharp, no ungrounded facts).
+    Caller must pass an open DB connection (e.g. from psycopg2).
+    """
+    canon = load_basil_canon(conn)
+    qvec = embed_query(user_text)
+    retrieved = retrieve_chunks(conn, qvec, user_text, k=6)
+    return _generate_reply_whitelist(user_text, retrieved, canon)
+
+
 def generate_reply_for_tweet(user_text: str) -> str:
     """
     Generate a single Basil reply for the given mention text.
