@@ -119,6 +119,16 @@ def run_ingest_and_draft(conn) -> tuple[int, int, int]:
                 skipped += 1
                 continue
 
+            reply_settings = t.get("reply_settings")
+            if reply_settings != "everyone":
+                logger.info(
+                    "whitelist_skip_reply_restricted tweet_id=%s reply_settings=%s",
+                    tweet_id,
+                    reply_settings,
+                )
+                skipped += 1
+                continue
+
             db.upsert_target(
                 tweet_id=tweet_id,
                 source="whitelist",
