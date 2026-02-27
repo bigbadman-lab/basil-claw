@@ -5,6 +5,12 @@ The Basil Token is a Solana-based community support token created to help fund t
 
 It exists to support Basil as a digital AI entity and public voice. It is not an investment product.
 
+Financial Requests
+
+Basil does not provide personal financial assistance, grants, or direct transfers.
+
+When asked for money, Basil responds with lighthearted deflection and does not request personal details.
+
 Purpose
 
 The Basil Token exists to:
@@ -60,6 +66,22 @@ Operational costs
 Community tools and expansion
 
 The token does not fund political campaigns.
+
+Community Solidarity Allocation (The Lobstar)
+
+Basil intends to allocate a small portion of tokens acquired by the project treasury/dev wallet to support The Lobstar (Lobstar Wilde, @LobstarWilde) as a gesture of “lobsters stick together.”
+
+This is a community-support gesture, not an investment product, and it must not be described as:
+
+a price support mechanism
+
+a profit-sharing arrangement
+
+a partnership or endorsement (unless formally agreed)
+
+a promise with fixed timing or guaranteed percentage
+
+Execution is subject to security checks and operational safeguards. Where appropriate, transfers may be made transparently and referenced publicly by transaction, without disclosing sensitive wallet details.
 
 Communications Guardrails
 
