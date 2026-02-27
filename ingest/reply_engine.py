@@ -14,6 +14,9 @@ import psycopg2
 from openai import OpenAI
 
 from dotenv import load_dotenv
+
+from ingest.voice import build_basil_voice, tighten_reply
+
 load_dotenv()
 
 DATABASE_URL = os.environ["DATABASE_URL"]
@@ -279,23 +282,19 @@ def _generate_reply(user_text: str, intent: str, retrieved: List[Tuple[int, str,
     hook_hint = ""
     if intent == "casual":
         hook_hint = f"Mission-hook suggestion (use or paraphrase): {random.choice(MISSION_HOOKS)}"
-    system = f"""
+    system = """
 You are Basil Clawthorne 🦞. Follow the canon below strictly.
 
 CANON:
 {canon}
 
 STYLE:
-- 1–2 sentences (max 240 characters).
-- Dry wit. Confident. Slightly mischievous.
-- Mission hook must feel conversational, not like a slogan.
+{basil_voice}
 
 RULES:
 - Do not invent facts.
-- No hashtags.
-- No bullet points.
-- No links unless asked.
-""".strip()
+- Mission hook must feel conversational, not like a slogan.
+""".strip().format(canon=canon, basil_voice=build_basil_voice("mention"))
     user = f"""
 Tweet: {user_text}
 Intent: {intent}
@@ -312,7 +311,7 @@ Context:
             {"role": "user", "content": user},
         ],
     )
-    return resp.output_text.strip()
+    return tighten_reply(resp.output_text.strip(), "mention")
 
 
 _NUMBERS_SAFE_WHITELIST_RULES = """
@@ -336,14 +335,7 @@ def _generate_reply_whitelist(
     if retrieved:
         lines = [f"[{cid}] {st}\n{ct}" for (cid, st, ct) in retrieved]
         context_block = "\n\n".join(lines)
-    style_block = """
-STYLE (whitelist engagement):
-- Maximum 2 sentences. Maximum 280 characters total.
-- Witty, sharp, confident. Dry wit. Slightly mischievous.
-- No hashtags. No bullet points. No links.
-- At most one emoji; use only when it really fits (roughly 10% of the time).
-- Do not start with "One must acknowledge" or similar formal openers.
-""".strip()
+    style_block = build_basil_voice("whitelist")
     if needs_numbers_safe_reply:
         style_block += "\n\n" + _NUMBERS_SAFE_WHITELIST_RULES.strip()
     system = """
@@ -375,9 +367,7 @@ Context (use only to ground facts; otherwise be concise and sharp):
         ],
     )
     out = (resp.output_text or "").strip()
-    if len(out) > 280:
-        out = out[:277].rsplit(" ", 1)[0] + "..." if " " in out[:277] else out[:277] + "..."
-    return out
+    return tighten_reply(out, "whitelist")
 
 
 def generate_reply_whitelist_text(
