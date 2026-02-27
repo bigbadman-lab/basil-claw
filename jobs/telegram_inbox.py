@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS telegram_state (
 """
 
 IDEAS_RATE_LIMIT_SECONDS = 20
+LINERS_RATE_LIMIT_SECONDS = 15
 
 BASIL_IDEAS_SYSTEM = """You are Basil Clawthorne: Victorian lobster orator. Generate standalone tweet drafts for X.
 
@@ -45,6 +46,12 @@ Rules: Sharp, direct, Victorian cadence. Lobster imagery (claws, shell, tank, pi
 Mix: if N>=5 aim for ~3 current-affairs reactions and ~2 fun lobster posts; if N<5 include at least 1 fun post when possible.
 
 Output format: EXACTLY N lines. Each line is one complete tweet draft. No numbering, no bullets, no quotes, no extra commentary."""
+
+BASIL_LINERS_SYSTEM = """You are Basil Clawthorne: Victorian lobster orator. Generate absurd "what Basil is doing right now" one-liners.
+
+Rules: Victorian cadence + surreal meme-friendly absurdity. Lobster imagery (claws, shell, tank, pincers, barnacles). Each line <= 140 characters. Each line ends with 🦞. No hashtags. No @mentions. No links. No slurs, no violence, no targeting protected groups. Avoid: "we need", "it's time", "let's", "in my opinion".
+
+Output format: EXACTLY N lines. Each line is one complete one-liner. No numbering, no bullets, no quotes, no extra commentary."""
 
 
 def _require_env(*names: str) -> None:
@@ -163,6 +170,25 @@ def _openai_generate_ideas(n: int, headlines_context: str) -> list[str]:
     return out[:n]
 
 
+def _openai_generate_liners(n: int) -> list[str]:
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    system = BASIL_LINERS_SYSTEM.replace("EXACTLY N", f"EXACTLY {n}")
+    resp = client.chat.completions.create(
+        model=os.getenv("CHAT_MODEL", "gpt-4.1-mini"),
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Generate exactly {n} absurd Basil one-liners (what Basil is doing right now)."},
+        ],
+        max_tokens=1800,
+    )
+    content = (resp.choices[0].message.content or "").strip()
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    out = [ln[:140] for ln in lines[:n]]
+    while len(out) < n:
+        out.append("Polishing the shell. Restore Britain. 🦞")
+    return out[:n]
+
+
 def _ensure_table() -> None:
     conn = _db_conn()
     try:
@@ -179,6 +205,20 @@ def _parse_ideas_command(text: str) -> Optional[int]:
         return 5
     if t.startswith("ideas "):
         rest = t[6:].strip()
+        try:
+            n = int(rest)
+            return max(1, min(12, n))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_liners_command(text: str) -> Optional[int]:
+    t = (text or "").strip().lower()
+    if t == "liners":
+        return 8
+    if t.startswith("liners "):
+        rest = t[7:].strip()
         try:
             n = int(rest)
             return max(1, min(12, n))
@@ -233,6 +273,30 @@ def _handle_ideas(n: int) -> None:
         msg = f"Idea {i}/{n}\n<code>{escaped}</code>"
         telegram_send_message(msg, parse_mode="HTML")
     print("INFO: sent ideas to Telegram.")
+
+
+def _handle_liners(n: int) -> None:
+    now_ts = int(time.time())
+    last_ts_str = _get_state("last_liners_ts")
+    if last_ts_str:
+        try:
+            last_ts = int(last_ts_str)
+            if now_ts - last_ts < LINERS_RATE_LIMIT_SECONDS:
+                telegram_send_message("Easy, claws. Try again in a moment. 🦞")
+                return
+        except ValueError:
+            pass
+    _set_state("last_liners_ts", str(now_ts))
+
+    liners = _openai_generate_liners(n)
+    telegram_send_message(
+        f"🦞 Basil liners (now) — {n} one-liners\nCommand: liners | liners 10"
+    )
+    for i, liner in enumerate(liners, 1):
+        escaped = _html_escape(liner)
+        msg = f"Liner {i}/{n}\n<code>{escaped}</code>"
+        telegram_send_message(msg, parse_mode="HTML")
+    print("INFO: sent liners to Telegram.")
 
 
 def main() -> None:
@@ -296,7 +360,10 @@ def main() -> None:
             n = _parse_ideas_command(text)
             if n is not None:
                 _handle_ideas(n)
-            # else ignore unknown command
+            else:
+                n_liners = _parse_liners_command(text)
+                if n_liners is not None:
+                    _handle_liners(n_liners)
 
     if max_update_id is not None:
         _set_state("last_update_id", str(max_update_id))
