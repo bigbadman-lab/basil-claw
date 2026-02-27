@@ -189,14 +189,31 @@ def _openai_generate_liners(n: int) -> list[str]:
     return out[:n]
 
 
-def _ensure_table() -> None:
-    conn = _db_conn()
+def _set_bot_commands() -> None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return
+    url = f"https://api.telegram.org/bot{token}/setMyCommands"
+    payload = {
+        "commands": [
+            {"command": "ping", "description": "Check the bot is alive"},
+            {"command": "ideas", "description": "Generate Basil tweet ideas (ideas N)"},
+            {"command": "liners", "description": "Generate absurd Basil one-liners (liners N)"},
+        ]
+    }
     try:
-        with conn.cursor() as cur:
-            cur.execute(TELEGRAM_STATE_TABLE)
-        conn.commit()
-    finally:
-        conn.close()
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            print("INFO: setMyCommands ok")
+        else:
+            print("WARN: setMyCommands not ok:", data)
+    except Exception as e:
+        print("WARN: setMyCommands failed:", e)
+
+
+def _ensure_table() -> None:
 
 
 def _parse_ideas_command(text: str) -> Optional[int]:
@@ -301,6 +318,7 @@ def _handle_liners(n: int) -> None:
 
 def main() -> None:
     _require_env("DATABASE_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "OPENAI_API_KEY")
+    _set_bot_commands()
     _ensure_table()
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -352,6 +370,8 @@ def main() -> None:
         text = (message.get("text") or "").strip()
         if not text:
             continue
+        if text.startswith("/"):
+            text = text[1:].lstrip()
 
         cmd = text.lower().strip()
         if cmd == "ping":
