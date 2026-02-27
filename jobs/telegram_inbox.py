@@ -223,6 +223,7 @@ def _ensure_table() -> None:
         conn.close()
 
 
+
 def _parse_ideas_command(text: str) -> Optional[int]:
     t = (text or "").strip().lower()
     if t == "ideas":
