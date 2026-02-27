@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import xml.etree.ElementTree as ET
 from typing import Optional
 
@@ -250,6 +251,18 @@ def _ensure_table() -> None:
 
 
 
+def extract_message_text(update: dict) -> Optional[str]:
+    """Extract text from update: prefer message.text, else message.caption, else None."""
+    message = update.get("message")
+    if not message:
+        return None
+    if message.get("text") is not None:
+        return message.get("text")
+    if message.get("caption") is not None:
+        return message.get("caption")
+    return None
+
+
 def extract_tweet_id_from_message(text: str) -> Optional[str]:
     """Extract first tweet ID from message (X/Twitter status URL or /status/ID). Returns None if none found."""
     if not (text or "").strip():
@@ -469,6 +482,8 @@ def main() -> None:
     result = data.get("result") or []
     max_update_id = None
 
+    HELP_PROMPT = "Paste an X status link (…/status/<id>) or paste tweet text. 🦞"
+
     for upd in result:
         update_id = upd.get("update_id")
         if update_id is not None:
@@ -480,65 +495,80 @@ def main() -> None:
         chat_id = int(chat.get("id", 0))
         if chat_id != allowed_chat_id:
             continue
-        text = (message.get("text") or "").strip()
-        if not text:
-            continue
+        raw_text = extract_message_text(upd)
+        text_found = raw_text is not None and len((raw_text or "").strip()) > 0
+        text = (raw_text or "").strip() if raw_text is not None else ""
+        preview = (text[:120] + "…") if len(text) > 120 else text
+        print(f"INFO: chat_id={chat_id} text_found={text_found} preview={repr(preview)}")
 
-        # 1) Awaiting tweet text: slash commands don't consume state
-        if chat_id in _draft_awaiting_tweet_text:
-            if text.startswith("/"):
-                telegram_send_message("Still waiting for tweet text or a tweet link. 🦞")
+        try:
+            # (d) No text → helpful prompt
+            if not text:
+                telegram_send_message(HELP_PROMPT)
                 continue
-            _draft_awaiting_tweet_text.pop(chat_id, None)
-            # If they sent another link, try fetch first; else treat as pasted text
+
+            # (a) Awaiting tweet text: handle first; slash commands don't consume state
+            if chat_id in _draft_awaiting_tweet_text:
+                if text.startswith("/"):
+                    telegram_send_message("Still waiting for tweet text or a tweet link. 🦞")
+                    continue
+                _draft_awaiting_tweet_text.pop(chat_id, None)
+                tweet_id = extract_tweet_id_from_message(text)
+                if tweet_id:
+                    try:
+                        from x_bridge import x_client
+                        tweet = x_client.get_tweet(tweet_id)
+                        if tweet and (tweet.get("text") or "").strip():
+                            username = (tweet.get("author_username") or "").strip() or "unknown"
+                            tweet_text = (tweet.get("text") or "").strip()
+                            mention_mode = "mention mode" in text.lower()
+                            try:
+                                reply_text = _generate_draft_reply(tweet_text, mention_mode=mention_mode)
+                                block = _normalize_reply_text(reply_text)
+                                msg = f"Tweet: @{username}\nDraft:\n<code>{_html_escape(block)}</code>"
+                                telegram_send_message(msg, parse_mode="HTML")
+                                continue
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                mention_mode = "mention mode" in text.lower()
+                if _handle_draft_from_pasted_text(chat_id, text, mention_mode=mention_mode):
+                    continue
+
+            # (b) Message contains X/Twitter status link (or t.co without id)
             tweet_id = extract_tweet_id_from_message(text)
+            if TCO_PATTERN.search(text) and not tweet_id:
+                telegram_send_message(
+                    "Can’t read t.co links directly — paste the full x.com/.../status/<id> link or paste the tweet text. 🦞"
+                )
+                continue
             if tweet_id:
-                try:
-                    from x_bridge import x_client
-                    tweet = x_client.get_tweet(tweet_id)
-                    if tweet and (tweet.get("text") or "").strip():
-                        username = (tweet.get("author_username") or "").strip() or "unknown"
-                        tweet_text = (tweet.get("text") or "").strip()
-                        mention_mode = "mention mode" in text.lower()
-                        try:
-                            reply_text = _generate_draft_reply(tweet_text, mention_mode=mention_mode)
-                            block = _normalize_reply_text(reply_text)
-                            msg = f"Tweet: @{username}\nDraft:\n<code>{_html_escape(block)}</code>"
-                            telegram_send_message(msg, parse_mode="HTML")
-                            continue
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            mention_mode = "mention mode" in text.lower()
-            if _handle_draft_from_pasted_text(chat_id, text, mention_mode=mention_mode):
-                continue
-        # 2) t.co link without /status/<id> → can't resolve
-        if TCO_PATTERN.search(text) and not extract_tweet_id_from_message(text):
-            telegram_send_message(
-                "Can’t read t.co links directly — paste the full x.com/.../status/<id> link or paste the tweet text. 🦞"
-            )
-            continue
-        # 3) Message contains X/Twitter status link → fetch tweet and draft reply
-        tweet_id = extract_tweet_id_from_message(text)
-        if tweet_id:
-            if _handle_draft_from_link(chat_id, tweet_id, text):
-                continue
-        # If _handle_draft_from_link didn't send (e.g. no x_client), fall through to commands
+                if _handle_draft_from_link(chat_id, tweet_id, text):
+                    continue
 
-        if text.startswith("/"):
-            text = text[1:].lstrip()
-        cmd = text.lower().strip()
-        if cmd == "ping":
-            _handle_ping()
-        else:
-            n = _parse_ideas_command(text)
-            if n is not None:
-                _handle_ideas(n)
-            else:
-                n_liners = _parse_liners_command(text)
-                if n_liners is not None:
-                    _handle_liners(n_liners)
+            # (c) Slash commands: only /ping, /ideas, /liners
+            t_lower = text.lower()
+            if t_lower.startswith("/ping") or t_lower.startswith("/ideas") or t_lower.startswith("/liners"):
+                cmd_text = text[1:].lstrip() if text.startswith("/") else text
+                cmd = cmd_text.lower().strip()
+                if cmd == "ping":
+                    _handle_ping()
+                else:
+                    n = _parse_ideas_command(cmd_text)
+                    if n is not None:
+                        _handle_ideas(n)
+                    else:
+                        n_liners = _parse_liners_command(cmd_text)
+                        if n_liners is not None:
+                            _handle_liners(n_liners)
+                continue
+
+            # (d) Other text: helpful prompt
+            telegram_send_message(HELP_PROMPT)
+        except Exception as e:
+            traceback.print_exc()
+            telegram_send_message(f"Draft error: {type(e).__name__}. Check logs. 🦞")
 
     if max_update_id is not None:
         _set_state("last_update_id", str(max_update_id))
