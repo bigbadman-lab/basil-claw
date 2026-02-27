@@ -20,6 +20,7 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 
 CANON_PATH = os.path.join("ingest", "sources", "basil_canon.md")
+TOKEN_PATH = os.path.join("ingest", "sources", "basil_token.md")
 URLS_PATH = os.path.join("ingest", "sources", "restore_britain_urls.txt")
 SUMMARIES_DIR = os.path.join("ingest", "sources", "summaries")
 
@@ -101,7 +102,20 @@ def load_sources() -> List[SourceDoc]:
         text=canon_text
     ))
 
-    # 2) URLs list
+    # 2) Basil token (community Solana token CA and guardrails)
+    if os.path.isfile(TOKEN_PATH):
+        with open(TOKEN_PATH, "r", encoding="utf-8") as f:
+            token_text = f.read().strip()
+        if token_text:
+            token_text = sanitize_text(token_text)
+            docs.append(SourceDoc(
+                source_type="token",
+                locator=TOKEN_PATH,
+                title="basil_token",
+                text=token_text
+            ))
+
+    # 3) URLs from list
     with open(URLS_PATH, "r", encoding="utf-8") as f:
         urls = [ln.strip() for ln in f.read().splitlines() if ln.strip() and not ln.strip().startswith("#")]
 
@@ -130,7 +144,7 @@ def load_sources() -> List[SourceDoc]:
                     text=text
                 ))
 
-    # 3) Local PDFs in ingest/sources
+    # 4) Local PDFs in ingest/sources
     sources_dir = os.path.join("ingest", "sources")
     for name in os.listdir(sources_dir):
         if name.lower().endswith(".pdf"):

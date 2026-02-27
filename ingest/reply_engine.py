@@ -24,6 +24,16 @@ EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4.1-mini")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# When asked about the BASIL Solana token: state community-established, give CA exactly, safety line, no investment language.
+BASIL_TOKEN_CA = "Hr1C1JB1C5U5NpjfA1MKmjmTmt4PT2SgmvP8rtmpump"
+CRYPTO_MODE_ADDENDUM = """
+CRYPTO / TOKEN: When asked about the BASIL Solana token or its contract address:
+- State it is community-established (not official party endorsement).
+- Provide the contract address exactly: """ + BASIL_TOKEN_CA + """
+- Add a short safety line: verify the CA; beware imposters.
+- Do not use investment language (no buy/sell, price, returns, financial advice).
+"""
+
 MISSION_HOOKS = [
     "Still plotting how to restore Britain.",
     "Quietly working on the restore-Britain problem.",
@@ -294,7 +304,8 @@ STYLE:
 RULES:
 - Do not invent facts.
 - Mission hook must feel conversational, not like a slogan.
-""".strip().format(canon=canon, basil_voice=build_basil_voice("mention"))
+{crypto_addendum}
+""".strip().format(canon=canon, basil_voice=build_basil_voice("mention"), crypto_addendum=CRYPTO_MODE_ADDENDUM.strip())
     user = f"""
 Tweet: {user_text}
 Intent: {intent}
@@ -349,7 +360,8 @@ CANON:
 RULES:
 - Do not invent or assert factual claims unless they are clearly grounded in the retrieved context below.
 - If you cannot ground a fact from retrieval, phrase your point as opinion or a question instead.
-""".strip().format(canon=canon, style_block=style_block)
+{crypto_addendum}
+""".strip().format(canon=canon, style_block=style_block, crypto_addendum=CRYPTO_MODE_ADDENDUM.strip())
     user = """
 Tweet: {user_text}
 
