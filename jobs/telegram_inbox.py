@@ -214,6 +214,13 @@ def _set_bot_commands() -> None:
 
 
 def _ensure_table() -> None:
+    conn = _db_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(TELEGRAM_STATE_TABLE)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _parse_ideas_command(text: str) -> Optional[int]:
