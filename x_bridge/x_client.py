@@ -29,19 +29,29 @@ def _user_id() -> str:
 def get_tweet(
     tweet_id: str,
     tweet_fields: Optional[list[str]] = None,
+    expansions: Optional[list[str]] = None,
+    user_fields: Optional[list[str]] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Fetch a single tweet by ID.
-    Returns dict with tweet_id, author_id, created_at, conversation_id, text, or None if not found/error.
+    Returns dict with tweet_id, author_id, author_username, author_name, created_at, conversation_id,
+    text, reply_settings, referenced_tweets; is_reply, is_retweet if derivable. None if not found/error.
     """
     if not tweet_id or not tweet_id.strip():
         return None
     client = get_v2_client()
-    fields = tweet_fields or ["author_id", "created_at", "conversation_id", "text"]
+    fields = tweet_fields or [
+        "created_at", "author_id", "text", "lang",
+        "referenced_tweets", "conversation_id", "reply_settings",
+    ]
+    exp = expansions if expansions is not None else ["author_id"]
+    uf = user_fields if user_fields is not None else ["username", "name"]
     try:
         resp = client.get_tweet(
             id=tweet_id.strip(),
             tweet_fields=fields,
+            expansions=exp,
+            user_fields=uf,
             user_auth=True,
         )
     except Exception:
@@ -54,12 +64,41 @@ def get_tweet(
     text = getattr(data, "text", None) or (data.get("text") if isinstance(data, dict) else "") or ""
     created_at = getattr(data, "created_at", None) or (data.get("created_at") if isinstance(data, dict) else None)
     conversation_id = getattr(data, "conversation_id", None) or (data.get("conversation_id") if isinstance(data, dict) else None)
+    reply_settings = getattr(data, "reply_settings", None) or (data.get("reply_settings") if isinstance(data, dict) else None)
+    refs = getattr(data, "referenced_tweets", None) or (data.get("referenced_tweets") if isinstance(data, dict) else None) or []
+
+    author_username = ""
+    author_name = ""
+    includes = getattr(resp, "includes", None) or (resp.get("includes") if isinstance(resp, dict) else {})
+    users_list = includes.get("users", []) if isinstance(includes, dict) else getattr(includes, "users", []) or []
+    for u in users_list:
+        uid = getattr(u, "id", None) or (u.get("id") if isinstance(u, dict) else None)
+        if str(uid) == str(author_id):
+            author_username = getattr(u, "username", None) or (u.get("username") if isinstance(u, dict) else "") or ""
+            author_name = getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "") or ""
+            break
+
+    is_reply = any(
+        (getattr(r, "type", None) or (r.get("type") if isinstance(r, dict) else None)) == "replied_to"
+        for r in refs
+    )
+    is_retweet = any(
+        (getattr(r, "type", None) or (r.get("type") if isinstance(r, dict) else None)) == "retweeted"
+        for r in refs
+    )
+
     return {
         "tweet_id": str(tid) if tid else tweet_id,
         "author_id": str(author_id) if author_id else "",
+        "author_username": author_username,
+        "author_name": author_name,
         "created_at": created_at,
         "conversation_id": str(conversation_id) if conversation_id else "",
         "text": text,
+        "reply_settings": str(reply_settings) if reply_settings is not None else None,
+        "referenced_tweets": refs,
+        "is_reply": is_reply,
+        "is_retweet": is_retweet,
     }
 
 

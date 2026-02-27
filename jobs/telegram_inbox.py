@@ -1,11 +1,13 @@
 """
 Polling Telegram bot: read messages from private chat, respond to commands.
 Primary command: "ideas" / "ideas N" to generate Basil tweet drafts on demand.
+Paste an X/twitter status link → bot fetches tweet and returns a Basil reply draft (ad-hoc, no DB write).
 
 Usage: python -m jobs.telegram_inbox
 
 Env: DATABASE_URL, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OPENAI_API_KEY.
      Optional: NEWS_RSS_URLS (comma-separated). Defaults: BBC, Guardian, Sky politics RSS.
+     For draft-from-link: X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET.
 """
 
 import os
@@ -21,6 +23,21 @@ from openai import OpenAI
 from x_bridge import config  # noqa: F401 - load .env deterministically
 from x_bridge import db
 from telegram_client import send_message as telegram_send_message
+
+# In-memory state: chat_id -> True when we asked user to paste tweet text after fetch failure.
+# No DB schema change; cleared when user sends next message (pasted text or anything).
+_draft_awaiting_tweet_text: dict[int, bool] = {}
+
+# Match X/Twitter status URLs: x.com, twitter.com, mobile.twitter.com; /status/<id> with optional query params
+STATUS_URL_PATTERN = re.compile(
+    r"https?://(?:www\.)?(?:x\.com|twitter\.com|mobile\.twitter\.com)/\w+/status/(\d+)(?:[/?\s]|$)",
+    re.IGNORECASE,
+)
+# Fallback: any /status/1234567890 in message (handles pasted URLs with extra chars)
+STATUS_ID_IN_TEXT = re.compile(r"/status/(\d+)", re.IGNORECASE)
+
+# t.co short links (we can't resolve these; ask for full status URL or pasted text)
+TCO_PATTERN = re.compile(r"t\.co/", re.IGNORECASE)
 
 
 DEFAULT_RSS_URLS = [
@@ -98,6 +115,15 @@ def _html_escape(text: str) -> str:
     if not text:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _normalize_reply_text(text: str) -> str:
+    """Replace newlines/tabs with single space, strip, collapse multiple spaces to one."""
+    if not text:
+        return ""
+    t = text.replace("\t", " ").replace("\n", " ").replace("\r", " ")
+    t = re.sub(r" +", " ", t).strip()
+    return t
 
 
 def _fetch_rss_items(urls: list[str], max_total: int = 8) -> list[dict]:
@@ -224,6 +250,17 @@ def _ensure_table() -> None:
 
 
 
+def extract_tweet_id_from_message(text: str) -> Optional[str]:
+    """Extract first tweet ID from message (X/Twitter status URL or /status/ID). Returns None if none found."""
+    if not (text or "").strip():
+        return None
+    m = STATUS_URL_PATTERN.search(text)
+    if m:
+        return m.group(1)
+    m = STATUS_ID_IN_TEXT.search(text)
+    return m.group(1) if m else None
+
+
 def _parse_ideas_command(text: str) -> Optional[int]:
     t = (text or "").strip().lower()
     if t == "ideas":
@@ -324,6 +361,73 @@ def _handle_liners(n: int) -> None:
     print("INFO: sent liners to Telegram.")
 
 
+def _generate_draft_reply(tweet_text: str, mention_mode: bool = False) -> str:
+    """Generate one Basil reply draft. mention_mode → mention pipeline; else whitelist. Uses DB for canon/retrieval."""
+    if mention_mode:
+        from ingest.reply_engine import generate_reply_for_tweet
+        return generate_reply_for_tweet(tweet_text)
+    conn = _db_conn()
+    try:
+        from ingest.reply_engine import generate_reply_whitelist_text
+        return generate_reply_whitelist_text(tweet_text, conn)
+    finally:
+        conn.close()
+
+
+def _handle_draft_from_pasted_text(chat_id: int, tweet_text: str, mention_mode: bool = False) -> bool:
+    """Generate draft from pasted tweet text; send to Telegram. Returns True if sent."""
+    if not (tweet_text or "").strip():
+        return False
+    try:
+        reply_text = _generate_draft_reply(tweet_text.strip(), mention_mode=mention_mode)
+    except Exception as e:
+        telegram_send_message(f"Couldn’t generate draft: {e}. Try again. 🦞")
+        return True
+    username = "(unknown)"
+    line1 = f"Tweet: @{username}"
+    line2 = "Draft:"
+    block = _normalize_reply_text(reply_text)
+    msg = f"{line1}\n{line2}\n<code>{_html_escape(block)}</code>"
+    telegram_send_message(msg, parse_mode="HTML")
+    print("INFO: sent draft-from-paste to Telegram.")
+    return True
+
+
+def _handle_draft_from_link(chat_id: int, tweet_id: str, message_text: str) -> bool:
+    """Fetch tweet by ID; generate draft; send. On fetch failure, ask user to paste text and set awaiting state. Returns True if handled."""
+    mention_mode = "mention mode" in (message_text or "").lower()
+    try:
+        from x_bridge import x_client
+        tweet = x_client.get_tweet(tweet_id)
+    except Exception as e:
+        _draft_awaiting_tweet_text[chat_id] = True
+        telegram_send_message(
+            "Can’t fetch that tweet. Paste the tweet text and I’ll draft a Basil reply. 🦞"
+        )
+        print(f"INFO: draft fetch failed for {tweet_id}: {e}; awaiting pasted text.")
+        return True
+    if not tweet or not (tweet.get("text") or "").strip():
+        _draft_awaiting_tweet_text[chat_id] = True
+        telegram_send_message(
+            "Can’t fetch that tweet. Paste the tweet text and I’ll draft a Basil reply. 🦞"
+        )
+        return True
+    username = (tweet.get("author_username") or "").strip() or "unknown"
+    tweet_text = (tweet.get("text") or "").strip()
+    try:
+        reply_text = _generate_draft_reply(tweet_text, mention_mode=mention_mode)
+    except Exception as e:
+        telegram_send_message(f"Couldn’t generate draft: {e}. Try again. 🦞")
+        return True
+    line1 = f"Tweet: @{username}"
+    line2 = "Draft:"
+    block = _normalize_reply_text(reply_text)
+    msg = f"{line1}\n{line2}\n<code>{_html_escape(block)}</code>"
+    telegram_send_message(msg, parse_mode="HTML")
+    print("INFO: sent draft-from-link to Telegram.")
+    return True
+
+
 def main() -> None:
     _require_env("DATABASE_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "OPENAI_API_KEY")
     _set_bot_commands()
@@ -373,14 +477,57 @@ def main() -> None:
         if not message:
             continue
         chat = message.get("chat") or {}
-        if int(chat.get("id", 0)) != allowed_chat_id:
+        chat_id = int(chat.get("id", 0))
+        if chat_id != allowed_chat_id:
             continue
         text = (message.get("text") or "").strip()
         if not text:
             continue
+
+        # 1) Awaiting tweet text: slash commands don't consume state
+        if chat_id in _draft_awaiting_tweet_text:
+            if text.startswith("/"):
+                telegram_send_message("Still waiting for tweet text or a tweet link. 🦞")
+                continue
+            _draft_awaiting_tweet_text.pop(chat_id, None)
+            # If they sent another link, try fetch first; else treat as pasted text
+            tweet_id = extract_tweet_id_from_message(text)
+            if tweet_id:
+                try:
+                    from x_bridge import x_client
+                    tweet = x_client.get_tweet(tweet_id)
+                    if tweet and (tweet.get("text") or "").strip():
+                        username = (tweet.get("author_username") or "").strip() or "unknown"
+                        tweet_text = (tweet.get("text") or "").strip()
+                        mention_mode = "mention mode" in text.lower()
+                        try:
+                            reply_text = _generate_draft_reply(tweet_text, mention_mode=mention_mode)
+                            block = _normalize_reply_text(reply_text)
+                            msg = f"Tweet: @{username}\nDraft:\n<code>{_html_escape(block)}</code>"
+                            telegram_send_message(msg, parse_mode="HTML")
+                            continue
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            mention_mode = "mention mode" in text.lower()
+            if _handle_draft_from_pasted_text(chat_id, text, mention_mode=mention_mode):
+                continue
+        # 2) t.co link without /status/<id> → can't resolve
+        if TCO_PATTERN.search(text) and not extract_tweet_id_from_message(text):
+            telegram_send_message(
+                "Can’t read t.co links directly — paste the full x.com/.../status/<id> link or paste the tweet text. 🦞"
+            )
+            continue
+        # 3) Message contains X/Twitter status link → fetch tweet and draft reply
+        tweet_id = extract_tweet_id_from_message(text)
+        if tweet_id:
+            if _handle_draft_from_link(chat_id, tweet_id, text):
+                continue
+        # If _handle_draft_from_link didn't send (e.g. no x_client), fall through to commands
+
         if text.startswith("/"):
             text = text[1:].lstrip()
-
         cmd = text.lower().strip()
         if cmd == "ping":
             _handle_ping()
