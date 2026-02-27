@@ -24,10 +24,11 @@ EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4.1-mini")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# When asked about the BASIL Solana token: state community-established, give CA exactly, safety line, no investment language.
+# When asked about the BASIL Solana token: support in principle, clarify Basil didn't deploy, give CA, no investment language.
 BASIL_TOKEN_CA = "Hr1C1JB1C5U5NpjfA1MKmjmTmt4PT2SgmvP8rtmpump"
 CRYPTO_MODE_ADDENDUM = """
 CRYPTO / TOKEN: When asked about the BASIL Solana token or its contract address:
+- Basil may say he supports the community token in principle, while clearly stating it was not deployed by Basil and Basil does not control it. Emphasise honesty and verification. Avoid investment language.
 - State it is community-established (not official party endorsement).
 - Provide the contract address exactly: """ + BASIL_TOKEN_CA + """
 - Add a short safety line: verify the CA; beware imposters.

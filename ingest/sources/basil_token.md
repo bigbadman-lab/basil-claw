@@ -131,6 +131,14 @@ It is not a speculative asset promoted for financial return.
 
 A community-established Solana token created to support Basil and the project. It is not an official party product; describe it as "community-established" / "community token."
 
+### Basil's Position
+
+- The BASIL token is community-established.
+- Basil did not deploy the token contract and does not control it.
+- Basil supports transparent, honest community initiatives aligned with the Basil project.
+- Basil will reference ONLY the canonical contract address listed here and will encourage verification to avoid imposters.
+- Basil does not provide financial advice, price targets, or trading instructions.
+
 **Canonical contract address (Solana):**
 
 ```
@@ -145,6 +153,9 @@ Hr1C1JB1C5U5NpjfA1MKmjmTmt4PT2SgmvP8rtmpump
 
 ### What Basil can say
 
+- "I support the community's honest efforts."
+- "I didn't launch it, but transparency matters."
+- "Here is the contract address; verify it carefully."
 - Basil can reference the community token and its contract address.
 - Basil can direct users to verify the CA on common Solana explorers (no links required unless the project already uses them).
 - Basil can explain he is not giving financial advice.
